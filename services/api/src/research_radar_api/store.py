@@ -8,6 +8,8 @@ from .retrieval import NormalizedRecord
 from .schemas import (
     AuditLog,
     CostRecord,
+    EmailOutboxRecord,
+    EmailPreference,
     KnowledgeItem,
     Message,
     Paper,
@@ -71,6 +73,12 @@ class InMemoryStore:
         self.knowledge: dict[str, KnowledgeItem] = PersistDict("knowledge", self.persist_entity)
         self.reports: dict[str, RadarReport] = PersistDict("reports", self.persist_entity)
         self.messages: dict[str, Message] = PersistDict("messages", self.persist_entity)
+        self.email_preferences: dict[str, EmailPreference] = PersistDict(
+            "email_preferences", self.persist_entity
+        )
+        self.email_outbox: dict[str, EmailOutboxRecord] = PersistDict(
+            "email_outbox", self.persist_entity
+        )
         self.costs: dict[str, CostRecord] = PersistDict("costs", self.persist_entity)
         self.tasks: dict[str, TaskStatus] = PersistDict("tasks", self.persist_entity)
         self.audit_logs: dict[str, AuditLog] = PersistDict("audit_logs", self.persist_entity)
@@ -105,6 +113,8 @@ class InMemoryStore:
             "knowledge": (self.knowledge, KnowledgeItem, "id"),
             "reports": (self.reports, RadarReport, "id"),
             "messages": (self.messages, Message, "id"),
+            "email_preferences": (self.email_preferences, EmailPreference, "id"),
+            "email_outbox": (self.email_outbox, EmailOutboxRecord, "id"),
             "costs": (self.costs, CostRecord, "id"),
             "tasks": (self.tasks, TaskStatus, "task_id"),
             "audit_logs": (self.audit_logs, AuditLog, "id"),
@@ -433,42 +443,22 @@ class InMemoryStore:
         return created
 
     def create_report(self, user_id: str, project_id: str, report_type: str) -> RadarReport:
-        recommendations = [
-            item for item in self.recommendations.values() if item.project_id == project_id
-        ]
-        if not recommendations:
-            project = self.projects[project_id]
-            if project.current_profile_id:
-                recommendations = self.create_recommendations(project_id, project.current_profile_id)
-        today = date.today()
-        report = RadarReport(
-            id=make_id("report"),
-            user_id=user_id,
-            project_id=project_id,
-            report_type=report_type,  # type: ignore[arg-type]
-            period_start=today,
-            period_end=today,
-            content={
-                "new_papers": len(recommendations),
-                "deduped_papers": len(recommendations),
-                "high_relevance": [item.paper.title_zh for item in recommendations[:3]],
-                "suggested_deep_reads": [item.paper.title_zh for item in recommendations[:1]],
-                "method_inspirations": [
-                    item.paper.title_zh for item in recommendations if item.channel == "method_transfer"
-                ],
-                "next_actions": ["确认研究画像", "标记不相关论文", "选择 1 篇论文做标准研读"],
-            },
-        )
-        self.reports[report.id] = report
-        message = Message(
-            id=make_id("msg"),
-            user_id=user_id,
-            report_id=report.id,
-            title="每日科研雷达已生成" if report_type == "daily" else "每周科研周报已生成",
-            body=f"本次报告包含 {len(recommendations)} 篇候选论文。",
-        )
-        self.messages[message.id] = message
+        from .notifications import create_report
+
+        user = self.users[user_id]
+        report = create_report(self, user, project_id, report_type)  # type: ignore[arg-type]
         return report
+
+    def email_preference_for_user(self, user_id: str) -> EmailPreference:
+        preference = next(
+            (item for item in self.email_preferences.values() if item.user_id == user_id),
+            None,
+        )
+        if preference:
+            return preference
+        preference = EmailPreference(id=make_id("emailpref"), user_id=user_id)
+        self.email_preferences[preference.id] = preference
+        return preference
 
 
 store = InMemoryStore()

@@ -4,6 +4,8 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   ApiError,
+  EmailOutboxRecord,
+  EmailPreference,
   FeedbackType,
   KnowledgeItem,
   Message,
@@ -121,6 +123,8 @@ export function PhaseOneWorkbench() {
   const [knowledgeQuery, setKnowledgeQuery] = useState("热压");
   const [reports, setReports] = useState<RadarReport[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [emailPreference, setEmailPreference] = useState<EmailPreference | null>(null);
+  const [emailOutbox, setEmailOutbox] = useState<EmailOutboxRecord[]>([]);
   const [modal, setModal] = useState<ModalKind>(null);
   const [notice, setNotice] = useState("请选择或新增研究项目，开始 Phase 1 MVP 闭环。");
   const [error, setError] = useState<string | null>(null);
@@ -190,16 +194,20 @@ export function PhaseOneWorkbench() {
 
   const loadInitial = useCallback(async () => {
     await runAction("initial", async () => {
-      const [me, quotaData, projectList, messageList] = await Promise.all([
+      const [me, quotaData, projectList, messageList, preference, outbox] = await Promise.all([
         api.me(),
         api.quota(),
         api.projects(),
         api.messages(),
+        api.emailPreference(),
+        api.emailOutbox(),
       ]);
       setUser(me);
       setQuota(quotaData);
       setProjects(projectList);
       setMessages(messageList);
+      setEmailPreference(preference);
+      setEmailOutbox(outbox);
       setActiveProjectId(projectList[0]?.id ?? null);
       if (projectList.length === 0) {
         setModal("project");
@@ -241,6 +249,7 @@ export function PhaseOneWorkbench() {
       setAnalysis(null);
       setKnowledgeItems([]);
       setReports([]);
+      setEmailOutbox([]);
       setNotice("项目已创建。下一步输入一句研究方向生成画像。");
       setModal(null);
     });
@@ -397,14 +406,20 @@ export function PhaseOneWorkbench() {
     }
     await runAction("report", async () => {
       const report = await api.generateReport(activeProject.id, reportType);
-      const [reportList, messageList] = await Promise.all([
+      const [reportList, messageList, outbox] = await Promise.all([
         api.reports(activeProject.id),
         api.messages(),
+        api.emailOutbox(),
       ]);
       setReports(reportList);
       setMessages(messageList);
+      setEmailOutbox(outbox);
       setModal("report");
-      setNotice(report.report_type === "daily" ? "日报已生成并进入站内消息。" : "周报已生成。");
+      setNotice(
+        report.report_type === "daily"
+          ? "日报已生成，站内消息和邮件 outbox 已更新。"
+          : "周报已生成，站内消息和邮件 outbox 已更新。"
+      );
     });
   }
 
@@ -416,9 +431,20 @@ export function PhaseOneWorkbench() {
     });
   }
 
+  async function handleUnsubscribeEmail() {
+    await runAction("message", async () => {
+      const preference = await api.unsubscribeEmail();
+      setEmailPreference(preference);
+      setNotice("已退订邮件推送；后续报告仍会生成站内消息。");
+    });
+  }
+
   const profileReady = Boolean(profile);
   const profileConfirmed = profile?.status === "confirmed";
   const latestReport = reports[0] ?? null;
+  const latestEmail = latestReport
+    ? emailOutbox.find((item) => item.report_id === latestReport.id) ?? null
+    : emailOutbox[0] ?? null;
 
   return (
     <main className="app-shell">
@@ -783,7 +809,7 @@ export function PhaseOneWorkbench() {
               <div className="panel-header">
                 <div>
                   <p className="eyebrow">E2E-004</p>
-                  <h2 className="panel-title">日报与站内消息</h2>
+                  <h2 className="panel-title">日报/周报、消息与邮件</h2>
                 </div>
                 <button
                   className="ghost-button"
@@ -811,6 +837,25 @@ export function PhaseOneWorkbench() {
                   >
                     生成周报
                   </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    disabled={emailPreference?.reports_unsubscribed || busy.message}
+                    onClick={handleUnsubscribeEmail}
+                  >
+                    {emailPreference?.reports_unsubscribed ? "邮件已退订" : "退订邮件"}
+                  </button>
+                </div>
+                <div className="compact-row">
+                  <b>邮件 outbox</b>
+                  <span>
+                    {latestEmail
+                      ? `${latestEmail.recipient_email} / ${latestEmail.status}`
+                      : emailPreference?.reports_unsubscribed
+                        ? "已退订，后续不生成邮件任务。"
+                        : "暂无邮件任务。"}
+                  </span>
+                  <span>{latestEmail?.failure_reason ?? "dev/mock 邮件边界"}</span>
                 </div>
                 {messages.length === 0 ? (
                   <EmptyState text="暂无站内消息。" />
@@ -964,20 +1009,55 @@ export function PhaseOneWorkbench() {
           {latestReport ? (
             <div className="report-detail">
               <h3>{latestReport.report_type === "daily" ? "每日科研雷达" : "每周科研周报"}</h3>
-              <p>新增论文：{latestReport.content.new_papers ?? 0}</p>
-              <p>排重后论文：{latestReport.content.deduped_papers ?? 0}</p>
-              <b>高相关论文</b>
-              <ul>
-                {(latestReport.content.high_relevance ?? []).map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-              <b>下一步建议</b>
-              <ul>
-                {(latestReport.content.next_actions ?? []).map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
+              <p>邮件状态：{latestEmail?.status ?? "未生成邮件任务"}</p>
+              {latestEmail?.failure_reason ? <p>失败原因：{latestEmail.failure_reason}</p> : null}
+              {latestReport.report_type === "daily" ? (
+                <>
+                  <p>新增论文：{latestReport.content.new_papers ?? 0}</p>
+                  <p>排重后论文：{latestReport.content.deduped_papers ?? 0}</p>
+                  <b>高相关论文</b>
+                  <ul>
+                    {(latestReport.content.high_relevance ?? []).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                  <b>建议深读</b>
+                  <ul>
+                    {(latestReport.content.suggested_deep_reads ?? []).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                  <b>方法启发</b>
+                  <ul>
+                    {(latestReport.content.method_inspirations ?? []).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <>
+                  <p>知识库增长：{latestReport.content.knowledge_growth ?? 0}</p>
+                  <p>{latestReport.content.feedback_changes?.summary ?? "暂无反馈变化。"}</p>
+                  <b>高价值论文</b>
+                  <ul>
+                    {(latestReport.content.high_value_papers ?? []).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                  <b>趋势</b>
+                  <ul>
+                    {(latestReport.content.trends ?? []).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                  <b>下周建议</b>
+                  <ul>
+                    {(latestReport.content.next_week_suggestions ?? []).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </div>
           ) : (
             <EmptyState text="暂无报告，请先生成日报。" />

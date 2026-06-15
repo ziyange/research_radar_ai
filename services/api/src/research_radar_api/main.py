@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from .ai import AiProvider, validate_analysis_safety
 from .db import database_health
+from .notifications import publish_report_notifications
 from .retrieval import (
     CrossrefAdapter,
     NormalizedRecord,
@@ -951,7 +952,12 @@ def search_knowledge(
 @app.get("/api/v1/projects/{project_id}/reports")
 def list_reports(project_id: str, request: Request, user: User = Depends(current_user)):
     project = get_project_for_user(project_id, user)
-    return envelope(request, [item for item in store.reports.values() if item.project_id == project.id])
+    reports = sorted(
+        [item for item in store.reports.values() if item.project_id == project.id],
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+    return envelope(request, reports)
 
 
 @app.get("/api/v1/reports/{report_id}")
@@ -969,10 +975,15 @@ def generate_report(
     report_type: str = "daily",
     request: Request = None,  # type: ignore[assignment]
     user: User = Depends(current_user),
+    settings: Settings = Depends(get_settings),
 ):
     project = get_project_for_user(project_id, user)
+    if report_type not in {"daily", "weekly"}:
+        raise HTTPException(status_code=422, detail="report_type must be daily or weekly")
     report = store.create_report(user.id, project.id, report_type)
-    store.audit("report.generate", "RR-MVP-026", user_id=user.id, project_id=project.id)
+    publish_report_notifications(store, user, report, settings)
+    requirement_id = "RR-MVP-026" if report_type == "daily" else "RR-MVP-027"
+    store.audit("report.generate", requirement_id, user_id=user.id, project_id=project.id)
     return envelope(request, report)
 
 
@@ -987,7 +998,45 @@ def mark_message_read(message_id: str, request: Request, user: User = Depends(cu
     if not message or message.user_id != user.id:
         raise HTTPException(status_code=404, detail="Message not found")
     message.read = True
+    store.messages[message.id] = message
     return envelope(request, message)
+
+
+@app.get("/api/v1/me/email-preference")
+def email_preference(request: Request, user: User = Depends(current_user)):
+    return envelope(request, store.email_preference_for_user(user.id))
+
+
+@app.post("/api/v1/me/email:unsubscribe")
+def unsubscribe_email_reports(request: Request, user: User = Depends(current_user)):
+    preference = store.email_preference_for_user(user.id)
+    preference.reports_unsubscribed = True
+    preference.unsubscribed_at = now_utc()
+    preference.updated_at = now_utc()
+    store.email_preferences[preference.id] = preference
+    store.audit("email.unsubscribe", "RR-MVP-028", user_id=user.id)
+    return envelope(request, preference)
+
+
+@app.post("/api/v1/me/email:subscribe")
+def subscribe_email_reports(request: Request, user: User = Depends(current_user)):
+    preference = store.email_preference_for_user(user.id)
+    preference.reports_unsubscribed = False
+    preference.unsubscribed_at = None
+    preference.updated_at = now_utc()
+    store.email_preferences[preference.id] = preference
+    store.audit("email.subscribe", "RR-MVP-028", user_id=user.id)
+    return envelope(request, preference)
+
+
+@app.get("/api/v1/me/email-outbox")
+def email_outbox(request: Request, user: User = Depends(current_user)):
+    records = sorted(
+        [item for item in store.email_outbox.values() if item.user_id == user.id],
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+    return envelope(request, records)
 
 
 @app.get("/api/v1/me/quota")

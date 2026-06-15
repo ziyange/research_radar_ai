@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_api_key: str | None = None
 
+    email_provider: Literal["mock", "smtp", "api"] = "mock"
+    email_from: str = "Research Radar AI <no-reply@research-radar.local>"
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+    email_mock_force_failure: bool = False
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: object) -> object:

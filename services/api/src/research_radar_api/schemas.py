@@ -337,6 +337,29 @@ class Message(BaseModel):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class EmailPreference(BaseModel):
+    id: str
+    user_id: str
+    reports_unsubscribed: bool = False
+    unsubscribed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
+class EmailOutboxRecord(BaseModel):
+    id: str
+    user_id: str
+    recipient_email: str
+    report_id: str
+    report_type: Literal["daily", "weekly"]
+    subject: str
+    status: Literal["queued", "sent", "failed"]
+    failure_reason: str | None = None
+    unsubscribed: bool = False
+    provider: Literal["mock", "smtp", "api"] = "mock"
+    created_at: datetime = Field(default_factory=now_utc)
+    sent_at: datetime | None = None
+
+
 class CostRecord(BaseModel):
     id: str
     user_id: str

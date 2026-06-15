@@ -86,7 +86,7 @@ export type SearchTask = {
 export type TaskStatus = {
   task_id: string;
   type: string;
-  status: "pending" | "running" | "succeeded" | "failed" | "retrying" | "cancelled";
+  status: "pending" | "running" | "succeeded" | "failed" | "retrying" | "cancelled" | "waiting";
   retryable: boolean;
   retry_count: number;
   error_code: string | null;
@@ -194,6 +194,15 @@ export type RadarReport = {
     suggested_deep_reads?: string[];
     method_inspirations?: string[];
     next_actions?: string[];
+    high_value_papers?: string[];
+    trends?: string[];
+    knowledge_growth?: number;
+    feedback_changes?: {
+      positive: number;
+      negative: number;
+      summary: string;
+    };
+    next_week_suggestions?: string[];
   };
   message_status: "draft" | "published" | "emailed" | "failed";
 };
@@ -206,6 +215,29 @@ export type Message = {
   body: string;
   read: boolean;
   created_at: string;
+};
+
+export type EmailPreference = {
+  id: string;
+  user_id: string;
+  reports_unsubscribed: boolean;
+  unsubscribed_at: string | null;
+  updated_at: string;
+};
+
+export type EmailOutboxRecord = {
+  id: string;
+  user_id: string;
+  recipient_email: string;
+  report_id: string;
+  report_type: "daily" | "weekly";
+  subject: string;
+  status: "queued" | "sent" | "failed";
+  failure_reason: string | null;
+  unsubscribed: boolean;
+  provider: "mock" | "smtp" | "api";
+  created_at: string;
+  sent_at: string | null;
 };
 
 export type CostRecord = {
@@ -380,4 +412,10 @@ export const api = {
   messages: () => request<Message[]>("/messages"),
   markMessageRead: (messageId: string) =>
     request<Message>(`/messages/${messageId}:read`, { method: "POST" }),
+  emailPreference: () => request<EmailPreference>("/me/email-preference"),
+  unsubscribeEmail: () =>
+    request<EmailPreference>("/me/email:unsubscribe", {
+      method: "POST",
+    }),
+  emailOutbox: () => request<EmailOutboxRecord[]>("/me/email-outbox"),
 };
