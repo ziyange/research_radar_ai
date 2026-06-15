@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     api_host: str = "127.0.0.1"
-    api_port: int = 8000
+    api_port: int = 8010
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
     )

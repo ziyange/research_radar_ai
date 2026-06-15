@@ -35,7 +35,7 @@ uv sync --cache-dir .uv-cache
 export DATABASE_URL="postgresql+psycopg://research_radar:research_radar@127.0.0.1:5432/research_radar"
 export RUN_POSTGRES_TESTS=1
 .venv/bin/python -m pytest services/api/tests/test_postgres_persistence.py
-uv run uvicorn research_radar_api.main:app --host 0.0.0.0 --port 8000 --app-dir services/api/src
+uv run uvicorn research_radar_api.main:app --host 0.0.0.0 --port 8010 --app-dir services/api/src
 ```
 
 ## 验收命令与结果
@@ -76,4 +76,3 @@ $env:PYTHONPATH='services/api/src'
 - `database_health` 支持 `postgresql+psycopg://` 连接串并返回 `pgvector` 可用性。
 - PostgreSQL 初始化现在会尝试启用 pgvector；若本机没有该扩展，不阻断 JSONB 持久化表初始化。
 - 新增 `services/api/tests/test_postgres_persistence.py`，用于显式 PostgreSQL 实机验收。
-
