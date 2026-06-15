@@ -22,6 +22,12 @@ uv venv .venv --python '.python\cpython-3.12.11-windows-x86_64-none\python.exe' 
 uv sync --cache-dir .uv-cache
 ```
 
+Linux/macOS 或 CI 可直接使用系统 Python 3.12：
+
+```bash
+uv sync --dev
+```
+
 ## 配置
 
 复制 `.env.example` 为 `.env`，按需填写：
@@ -32,6 +38,8 @@ uv sync --cache-dir .uv-cache
 - `AI_PROVIDER`
 
 默认 `AI_PROVIDER=mock`，不会调用真实 AI API。你填入配置并切换 provider 后，后端再走 OpenAI 兼容接口。
+
+Phase 1 默认验收全部使用 mock AI，不需要也不读取真实 OpenAI Key。
 
 ### 数据库模式
 
@@ -88,7 +96,7 @@ uv run uvicorn research_radar_api.main:app --host 0.0.0.0 --port 8010 --app-dir 
 ## 后端
 
 ```powershell
-uv run uvicorn research_radar_api.main:app --reload --app-dir services/api/src
+uv run uvicorn research_radar_api.main:app --reload --host 127.0.0.1 --port 8010 --app-dir services/api/src
 ```
 
 健康检查：
@@ -110,12 +118,77 @@ npm run dev:web
 http://localhost:3000
 ```
 
-## 测试
+## Phase 1 本地总验收
+
+默认验收不需要 secrets、不访问 live OpenAlex/Crossref、不依赖 PostgreSQL。Windows 上建议先进入 `.venv`，确保 `python` 和 `ruff` 来自项目环境：
 
 ```powershell
-uv run pytest
-npm run build
+uv sync --cache-dir .uv-cache
+npm install
+.\.venv\Scripts\Activate.ps1
+.\scripts\check_phase1.ps1
 ```
+
+Linux/macOS 等价命令：
+
+```bash
+uv sync --dev
+npm ci
+source .venv/bin/activate
+bash scripts/check_phase1.sh
+```
+
+脚本覆盖以下发布前检查：
+
+```powershell
+python -m pytest
+ruff check
+npm run lint:web
+npx tsc --noEmit --project apps/web/tsconfig.json
+npm run build
+python services/api/evals/recommendation_eval.py --top-n 10
+python services/api/evals/ai_safety_eval.py
+```
+
+GitHub Actions 使用同一组检查，见 `.github/workflows/ci.yml`。CI 环境变量固定为 `AI_PROVIDER=mock`、`RETRIEVAL_PROVIDER=mock`、`DATABASE_URL=sqlite+memory://ci`、`RUN_LIVE_RETRIEVAL_TESTS=0`、`RUN_POSTGRES_TESTS=0`。
+
+## 新机器从 clone 到跑通验收
+
+Windows PowerShell：
+
+```powershell
+git clone git@github.com:ziyange/research_radar_ai.git
+Set-Location research_radar_ai
+uv python install 3.12 --install-dir .python --cache-dir .uv-cache
+uv venv .venv --python '.python\cpython-3.12.11-windows-x86_64-none\python.exe' --cache-dir .uv-cache
+uv sync --cache-dir .uv-cache
+npm install
+Copy-Item .env.example .env
+.\.venv\Scripts\Activate.ps1
+.\scripts\check_phase1.ps1
+```
+
+启动本地 MVP：
+
+```powershell
+$env:AI_PROVIDER="mock"
+$env:RETRIEVAL_PROVIDER="mock"
+$env:DATABASE_URL="sqlite+memory://dev"
+uv run uvicorn research_radar_api.main:app --reload --host 127.0.0.1 --port 8010 --app-dir services/api/src
+```
+
+另开一个终端：
+
+```powershell
+npm run dev:web
+```
+
+访问：
+
+- API: `http://127.0.0.1:8010/api/v1/health`
+- Web: `http://localhost:3000`
+
+## 可选实机验收
 
 PostgreSQL 实机持久化验收需先启动 docker-compose 的 postgres，并显式打开：
 
@@ -124,6 +197,19 @@ $env:DATABASE_URL="postgresql+psycopg://research_radar:research_radar@localhost:
 $env:RUN_POSTGRES_TESTS="1"
 .venv\Scripts\python.exe -m pytest services/api/tests/test_postgres_persistence.py
 ```
+
+真实 OpenAlex/Crossref smoke 测试也必须显式打开，默认 CI 不运行：
+
+```powershell
+$env:RUN_LIVE_RETRIEVAL_TESTS="1"
+python -m pytest services/api/tests/test_live_retrieval.py
+```
+
+## Phase 1 / Phase 2 边界
+
+Phase 1 已完成的是 MVP 闭环：账号与项目、画像、上传队列、检索规划、OpenAlex/Crossref 适配与 mock 降级、排重、推荐、反馈纠偏、快速/标准 AI 分析的 mock 验收、知识库基础状态、日报/周报、站内消息、mock email outbox、成本额度、审计与任务状态。
+
+仍属于 Phase 2 或未来能力：全文 PDF 章节/表格/图证据定位、真实邮件服务、真实 OpenAI Key 生产接入、Semantic Scholar/arXiv 扩展、Zotero、浏览器扩展、移动端、团队/机构版、私有部署和复杂知识图谱。
 
 ## 文档约束
 
