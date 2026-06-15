@@ -328,6 +328,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ one_sentence: oneSentence }),
     }),
+  profile: (projectId: string) => request<ResearchProfile>(`/projects/${projectId}/profile`),
   patchProfile: (
     projectId: string,
     payload: Partial<

@@ -1,6 +1,37 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  Activity,
+  Bell,
+  BookOpen,
+  BookmarkPlus,
+  CheckCircle2,
+  CircleSlash2,
+  ClipboardList,
+  CreditCard,
+  Database,
+  FileSearch,
+  FolderKanban,
+  Inbox,
+  LayoutDashboard,
+  Library,
+  Loader2,
+  MailX,
+  MessageSquare,
+  Microscope,
+  Pencil,
+  Plus,
+  Radar,
+  RefreshCw,
+  Search,
+  Settings,
+  Sparkles,
+  WandSparkles,
+  X,
+  Zap,
+  type LucideIcon,
+} from "lucide-react";
 
 import {
   ApiError,
@@ -56,7 +87,18 @@ const taskLabels: Record<SearchTask["task_type"], string> = {
   exploratory: "探索检索",
 };
 
-type ModalKind = "project" | "profile" | "report" | "quota" | "notice" | null;
+type ActiveModal = "project" | "profileWizard" | "profileEdit" | "report" | "quota" | null;
+
+type ToastState = {
+  tone: "success" | "error" | "warning";
+  message: string;
+} | null;
+
+type NavItem = {
+  label: string;
+  icon: LucideIcon;
+  status: "active" | "future";
+};
 
 type BusyKey =
   | "initial"
@@ -71,6 +113,15 @@ type BusyKey =
   | "report"
   | "message";
 
+const navItems: NavItem[] = [
+  { label: "工作台", icon: LayoutDashboard, status: "active" },
+  { label: "雷达探索", icon: Radar, status: "future" },
+  { label: "论文追踪", icon: FileSearch, status: "future" },
+  { label: "项目管理", icon: FolderKanban, status: "future" },
+  { label: "知识库", icon: Library, status: "future" },
+  { label: "消息中心", icon: Inbox, status: "future" },
+];
+
 function asErrorMessage(error: unknown) {
   if (error instanceof ApiError) {
     return error.message;
@@ -78,7 +129,7 @@ function asErrorMessage(error: unknown) {
   if (error instanceof Error) {
     return error.message;
   }
-  return "操作失败，请稍后重试。";
+  return "请求失败，请稍后重试。";
 }
 
 function joinTags(values: string[]) {
@@ -103,6 +154,13 @@ function resultText(analysis: PaperAnalysis | null, key: string) {
   return typeof value === "string" ? value : "暂无";
 }
 
+function profileState(profile: ResearchProfile | null) {
+  if (!profile) {
+    return "未生成画像";
+  }
+  return `v${profile.version} / ${profile.status} / 置信度 ${Math.round(profile.confidence * 100)}%`;
+}
+
 export function PhaseOneWorkbench() {
   const [user, setUser] = useState<User | null>(null);
   const [quota, setQuota] = useState<{ quota_balance: number; plan: User["plan"] } | null>(null);
@@ -125,9 +183,8 @@ export function PhaseOneWorkbench() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [emailPreference, setEmailPreference] = useState<EmailPreference | null>(null);
   const [emailOutbox, setEmailOutbox] = useState<EmailOutboxRecord[]>([]);
-  const [modal, setModal] = useState<ModalKind>(null);
-  const [notice, setNotice] = useState("请选择或新增研究项目，开始 Phase 1 MVP 闭环。");
-  const [error, setError] = useState<string | null>(null);
+  const [modal, setModal] = useState<ActiveModal>(null);
+  const [toast, setToast] = useState<ToastState>(null);
   const [busy, setBusy] = useState<Partial<Record<BusyKey, boolean>>>({ initial: true });
 
   const [projectForm, setProjectForm] = useState(defaultProject);
@@ -173,24 +230,88 @@ export function PhaseOneWorkbench() {
     );
   }, [knowledgeQuery, recommendations]);
 
+  const latestReport = reports[0] ?? null;
+  const latestEmail = latestReport
+    ? emailOutbox.find((item) => item.report_id === latestReport.id) ?? null
+    : emailOutbox[0] ?? null;
+  const profileReady = Boolean(profile);
+  const profileConfirmed = profile?.status === "confirmed";
+
+  const showAppToast = useCallback((tone: NonNullable<ToastState>["tone"], message: string) => {
+    setToast({ tone, message });
+  }, []);
+
+  useEffect(() => {
+    if (!toast) {
+      return;
+    }
+    const timer = window.setTimeout(() => setToast(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
   const setBusyKey = useCallback((key: BusyKey, value: boolean) => {
     setBusy((current) => ({ ...current, [key]: value }));
   }, []);
 
   const runAction = useCallback(
     async (key: BusyKey, action: () => Promise<void>) => {
-      setError(null);
       setBusyKey(key, true);
       try {
         await action();
       } catch (actionError) {
-        setError(asErrorMessage(actionError));
+        const message = asErrorMessage(actionError);
+        showAppToast("error", message || "请求失败，请稍后重试。");
       } finally {
         setBusyKey(key, false);
       }
     },
-    [setBusyKey]
+    [setBusyKey, showAppToast]
   );
+
+  const resetProjectContext = useCallback(() => {
+    setProfile(null);
+    setDiagnosis(null);
+    setSearchTasks([]);
+    setTaskRuns([]);
+    setRecommendations([]);
+    setSelectedRecommendationId(null);
+    setFeedbackItems([]);
+    setAnalysis(null);
+    setKnowledgeItems([]);
+    setReports([]);
+  }, []);
+
+  const loadProjectContext = useCallback(async (project: ResearchProject) => {
+    resetProjectContext();
+    if (!project.current_profile_id) {
+      return;
+    }
+    try {
+      const currentProfile = await api.profile(project.id);
+      setProfile(currentProfile);
+      if (currentProfile.status !== "confirmed") {
+        return;
+      }
+      const [nextDiagnosis, recList, savedFeedback, savedKnowledge, reportList, outbox] =
+        await Promise.all([
+          api.diagnosis(project.id),
+          api.recommendations(project.id),
+          api.projectFeedback(project.id),
+          api.searchKnowledge(project.id, "热压"),
+          api.reports(project.id),
+          api.emailOutbox(),
+        ]);
+      setDiagnosis(nextDiagnosis);
+      setRecommendations(recList.items);
+      setSelectedRecommendationId(recList.items[0]?.id ?? null);
+      setFeedbackItems(savedFeedback);
+      setKnowledgeItems(savedKnowledge);
+      setReports(reportList);
+      setEmailOutbox(outbox);
+    } catch {
+      showAppToast("warning", "项目上下文加载失败，可重新生成画像。");
+    }
+  }, [resetProjectContext, showAppToast]);
 
   const loadInitial = useCallback(async () => {
     await runAction("initial", async () => {
@@ -208,12 +329,15 @@ export function PhaseOneWorkbench() {
       setMessages(messageList);
       setEmailPreference(preference);
       setEmailOutbox(outbox);
-      setActiveProjectId(projectList[0]?.id ?? null);
-      if (projectList.length === 0) {
+      const firstProject = projectList[0] ?? null;
+      setActiveProjectId(firstProject?.id ?? null);
+      if (firstProject) {
+        await loadProjectContext(firstProject);
+      } else {
         setModal("project");
       }
     });
-  }, [runAction]);
+  }, [loadProjectContext, runAction]);
 
   useEffect(() => {
     void loadInitial();
@@ -240,74 +364,80 @@ export function PhaseOneWorkbench() {
       const project = await api.createProject(projectForm);
       setProjects((current) => [project, ...current]);
       setActiveProjectId(project.id);
-      setProfile(null);
-      setDiagnosis(null);
-      setSearchTasks([]);
-      setTaskRuns([]);
-      setRecommendations([]);
-      setFeedbackItems([]);
-      setAnalysis(null);
-      setKnowledgeItems([]);
-      setReports([]);
-      setEmailOutbox([]);
-      setNotice("项目已创建。下一步输入一句研究方向生成画像。");
-      setModal(null);
+      resetProjectContext();
+      setProjectForm(defaultProject);
+      showAppToast("success", "项目已创建，请生成研究画像。");
+      setModal("profileWizard");
     });
   }
 
   async function handleGenerateProfile() {
     if (!activeProject) {
-      setNotice("请先新增研究项目。");
       setModal("project");
+      showAppToast("warning", "请先点击左侧加号新增项目。");
       return;
     }
     await runAction("profile", async () => {
       const nextProfile = await api.generateProfile(activeProject.id, oneSentence);
       setProfile(nextProfile);
       setDiagnosis(null);
-      setNotice("画像草稿已生成，可编辑后确认。");
+      showAppToast("success", "画像草稿已生成。");
+      setModal("profileEdit");
+    });
+  }
+
+  async function patchProfileDraft() {
+    if (!activeProject) {
+      return null;
+    }
+    return api.patchProfile(activeProject.id, {
+      research_object: splitTags(profileDraft.research_object),
+      methods: splitTags(profileDraft.methods),
+      materials: splitTags(profileDraft.materials),
+      metrics: splitTags(profileDraft.metrics),
+      keywords_zh: splitTags(profileDraft.keywords_zh),
+      keywords_en: splitTags(profileDraft.keywords_en),
+      exclusions: splitTags(profileDraft.exclusions),
     });
   }
 
   async function handleSaveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!activeProject) {
-      return;
-    }
     await runAction("profile", async () => {
-      const nextProfile = await api.patchProfile(activeProject.id, {
-        research_object: splitTags(profileDraft.research_object),
-        methods: splitTags(profileDraft.methods),
-        materials: splitTags(profileDraft.materials),
-        metrics: splitTags(profileDraft.metrics),
-        keywords_zh: splitTags(profileDraft.keywords_zh),
-        keywords_en: splitTags(profileDraft.keywords_en),
-        exclusions: splitTags(profileDraft.exclusions),
-      });
-      setProfile(nextProfile);
-      setNotice("画像已保存为新草稿版本。");
-      setModal(null);
+      const nextProfile = await patchProfileDraft();
+      if (nextProfile) {
+        setProfile(nextProfile);
+      }
+      showAppToast("success", "画像已保存为草稿。");
     });
   }
 
-  async function handleConfirmProfile() {
+  async function handleSaveAndConfirmProfile() {
     if (!activeProject || !profile) {
       return;
     }
     await runAction("confirm", async () => {
+      const saved = await patchProfileDraft();
+      if (saved) {
+        setProfile(saved);
+      }
       const confirmed = await api.confirmProfile(activeProject.id);
       const nextDiagnosis = await api.diagnosis(activeProject.id);
+      const nextRecommendations = nextDiagnosis.highly_related_papers.concat(
+        nextDiagnosis.method_transfer_papers
+      );
       setProfile(confirmed);
       setDiagnosis(nextDiagnosis);
-      setRecommendations(nextDiagnosis.highly_related_papers.concat(nextDiagnosis.method_transfer_papers));
-      setSelectedRecommendationId(nextDiagnosis.highly_related_papers[0]?.id ?? null);
-      setNotice("画像已确认，首日诊断已生成。");
+      setRecommendations(nextRecommendations);
+      setSelectedRecommendationId(nextRecommendations[0]?.id ?? null);
+      setModal(null);
+      showAppToast("success", "画像已确认，首日诊断已生成。");
     });
   }
 
   async function handleSearchLoop() {
-    if (!activeProject || profile?.status !== "confirmed") {
-      setNotice("请先确认研究画像，再生成检索任务。");
+    if (!activeProject || !profileConfirmed) {
+      showAppToast("warning", "请先确认研究画像。");
       return;
     }
     await runAction("search", async () => {
@@ -320,13 +450,13 @@ export function PhaseOneWorkbench() {
       setRecommendations(recList.items);
       setSelectedRecommendationId(recList.items[0]?.id ?? null);
       setFeedbackItems(savedFeedback);
-      setNotice("检索任务已运行，推荐列表已更新。");
+      showAppToast("success", "检索任务已运行，推荐已更新。");
     });
   }
 
   async function handleRefreshRecommendations() {
-    if (!activeProject || profile?.status !== "confirmed") {
-      setNotice("请先确认研究画像。");
+    if (!activeProject || !profileConfirmed) {
+      showAppToast("warning", "请先确认研究画像。");
       return;
     }
     await runAction("recommend", async () => {
@@ -335,7 +465,7 @@ export function PhaseOneWorkbench() {
       setRecommendations(recList.items);
       setFeedbackItems(savedFeedback);
       setSelectedRecommendationId(recList.items[0]?.id ?? null);
-      setNotice("推荐已刷新，反馈后的分数变化会保留在列表中。");
+      showAppToast("success", "推荐已刷新。");
     });
   }
 
@@ -351,7 +481,7 @@ export function PhaseOneWorkbench() {
         const recList = await api.recommendations(activeProject.id);
         setRecommendations(recList.items);
       }
-      setNotice(`已提交反馈：${feedbackLabels[feedbackType]}。`);
+      showAppToast("success", `已提交反馈：${feedbackLabels[feedbackType]}。`);
     });
   }
 
@@ -368,7 +498,10 @@ export function PhaseOneWorkbench() {
       const nextQuota = await api.quota();
       setAnalysis(nextAnalysis);
       setQuota(nextQuota);
-      setNotice(analysisType === "quick" ? "快速分析已完成。" : "标准研读已完成并记录成本。");
+      showAppToast(
+        "success",
+        analysisType === "quick" ? "快速分析已完成。" : "标准研读已完成并记录成本。"
+      );
     });
   }
 
@@ -385,7 +518,7 @@ export function PhaseOneWorkbench() {
       });
       const search = await api.searchKnowledge(activeProject.id, knowledgeQuery || "热压");
       setKnowledgeItems(search.length > 0 ? search : [item]);
-      setNotice("论文已加入知识库，搜索结果已刷新。");
+      showAppToast("success", "论文已加入知识库。");
     });
   }
 
@@ -396,7 +529,7 @@ export function PhaseOneWorkbench() {
     await runAction("knowledge", async () => {
       const search = await api.searchKnowledge(activeProject.id, knowledgeQuery);
       setKnowledgeItems(search);
-      setNotice(search.length > 0 ? "知识库已返回匹配条目。" : "知识库暂无匹配条目。");
+      showAppToast("success", search.length > 0 ? "知识库已返回匹配条目。" : "知识库暂无匹配条目。");
     });
   }
 
@@ -405,7 +538,7 @@ export function PhaseOneWorkbench() {
       return;
     }
     await runAction("report", async () => {
-      const report = await api.generateReport(activeProject.id, reportType);
+      await api.generateReport(activeProject.id, reportType);
       const [reportList, messageList, outbox] = await Promise.all([
         api.reports(activeProject.id),
         api.messages(),
@@ -415,11 +548,7 @@ export function PhaseOneWorkbench() {
       setMessages(messageList);
       setEmailOutbox(outbox);
       setModal("report");
-      setNotice(
-        report.report_type === "daily"
-          ? "日报已生成，站内消息和邮件 outbox 已更新。"
-          : "周报已生成，站内消息和邮件 outbox 已更新。"
-      );
+      showAppToast("success", reportType === "daily" ? "日报已生成。" : "周报已生成。");
     });
   }
 
@@ -427,7 +556,7 @@ export function PhaseOneWorkbench() {
     await runAction("message", async () => {
       const updated = await api.markMessageRead(message.id);
       setMessages((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-      setNotice("站内消息已标记为已读。");
+      showAppToast("success", "站内消息已标记为已读。");
     });
   }
 
@@ -435,19 +564,27 @@ export function PhaseOneWorkbench() {
     await runAction("message", async () => {
       const preference = await api.unsubscribeEmail();
       setEmailPreference(preference);
-      setNotice("已退订邮件推送；后续报告仍会生成站内消息。");
+      showAppToast("success", "已退订邮件推送。");
     });
   }
 
-  const profileReady = Boolean(profile);
-  const profileConfirmed = profile?.status === "confirmed";
-  const latestReport = reports[0] ?? null;
-  const latestEmail = latestReport
-    ? emailOutbox.find((item) => item.report_id === latestReport.id) ?? null
-    : emailOutbox[0] ?? null;
+  async function handleSelectProject(project: ResearchProject) {
+    await runAction("initial", async () => {
+      setActiveProjectId(project.id);
+      await loadProjectContext(project);
+      showAppToast("success", `已切换到项目：${project.name}`);
+    });
+  }
+
+  function handleSelectRecommendation(recommendation: Recommendation) {
+    setSelectedRecommendationId(recommendation.id);
+    setAnalysis(null);
+  }
 
   return (
     <main className="app-shell">
+      {toast ? <Toast toast={toast} /> : null}
+
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">R</div>
@@ -458,22 +595,22 @@ export function PhaseOneWorkbench() {
         </div>
 
         <nav className="nav" aria-label="主导航">
-          {["工作台", "雷达探索", "论文追踪", "项目管理", "知识库", "消息中心"].map((item) => (
-            <button
-              className="nav-button"
-              key={item}
-              type="button"
-              onClick={() => {
-                setNotice(`${item}已聚焦。本阶段保持在 Phase 1 闭环工作台内完成验收。`);
-                setModal("notice");
-              }}
-            >
-              <span className="nav-icon" aria-hidden="true">
-                {item.slice(0, 1)}
-              </span>
-              {item}
-            </button>
-          ))}
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const isFuture = item.status === "future";
+            return (
+              <button
+                className={`nav-button ${item.status === "active" ? "active" : ""}`}
+                disabled={isFuture}
+                key={item.label}
+                type="button"
+              >
+                <Icon className="nav-icon" aria-hidden="true" size={18} />
+                <span>{item.label}</span>
+                {isFuture ? <span className="future-pill">待开放</span> : null}
+              </button>
+            );
+          })}
         </nav>
 
         <section className="project-section">
@@ -485,12 +622,12 @@ export function PhaseOneWorkbench() {
               type="button"
               onClick={() => setModal("project")}
             >
-              +
+              <Plus size={18} />
             </button>
           </div>
           <div className="project-list">
             {projects.length === 0 ? (
-              <p className="empty-copy">暂无项目，请新增研究项目。</p>
+              <p className="empty-copy">点击右上角加号创建第一个课题。</p>
             ) : (
               projects.map((project) => (
                 <button
@@ -498,12 +635,11 @@ export function PhaseOneWorkbench() {
                   key={project.id}
                   type="button"
                   onClick={() => {
-                    setActiveProjectId(project.id);
-                    setNotice(`已切换到项目：${project.name}`);
+                    void handleSelectProject(project);
                   }}
                 >
                   <span className="paper-dot" />
-                  {project.name}
+                  <span className="project-name">{project.name}</span>
                   <span className="project-count">{project.status}</span>
                 </button>
               ))
@@ -514,23 +650,13 @@ export function PhaseOneWorkbench() {
         <div className="sidebar-spacer" />
         <div className="bottom-nav">
           <button className="nav-button" type="button" onClick={() => setModal("quota")}>
-            <span className="nav-icon" aria-hidden="true">
-              Q
-            </span>
-            额度与扩容
+            <CreditCard className="nav-icon" aria-hidden="true" size={18} />
+            <span>额度与扩容</span>
           </button>
-          <button
-            className="nav-button"
-            type="button"
-            onClick={() => {
-              setNotice("Phase 1 暂不进入团队、移动端或完整知识图谱设置。");
-              setModal("notice");
-            }}
-          >
-            <span className="nav-icon" aria-hidden="true">
-              S
-            </span>
-            设置
+          <button className="nav-button" type="button" disabled>
+            <Settings className="nav-icon" aria-hidden="true" size={18} />
+            <span>设置</span>
+            <span className="future-pill">待开放</span>
           </button>
         </div>
       </aside>
@@ -538,7 +664,7 @@ export function PhaseOneWorkbench() {
       <section className="main">
         <header className="topbar">
           <label className="search">
-            <span aria-hidden="true">/</span>
+            <Search size={17} aria-hidden="true" />
             <input
               placeholder="搜索推荐、知识库标签、关键词..."
               value={knowledgeQuery}
@@ -550,7 +676,7 @@ export function PhaseOneWorkbench() {
             <div className="quota-bar" aria-hidden="true">
               <div className="quota-fill" />
             </div>
-            <button className="ghost-button" type="button" onClick={() => setModal("quota")}>
+            <button className="ghost-button small" type="button" onClick={() => setModal("quota")}>
               去扩容
             </button>
           </div>
@@ -564,97 +690,44 @@ export function PhaseOneWorkbench() {
         </header>
 
         <div className="workspace">
-          <div className="primary-stack">
-            {error ? <StatusBanner tone="error" text={error} /> : null}
-            <StatusBanner tone="info" text={notice} />
-
-            <section className="panel">
-              <div className="panel-header">
+          <section className="radar-column">
+            <section className="panel compact-panel">
+              <div className="panel-header compact">
                 <div>
-                  <p className="eyebrow">E2E-001</p>
-                  <h2 className="panel-title">冷启动到首日诊断</h2>
+                  <p className="eyebrow">Phase 1 工作台</p>
+                  <h2 className="panel-title">{activeProject?.name ?? "尚未选择研究项目"}</h2>
                 </div>
-                <button className="primary-button" type="button" onClick={() => setModal("project")}>
-                  新增项目
-                </button>
-              </div>
-              <div className="flow-grid">
-                <div className="flow-card">
-                  <span className="step-index">1</span>
-                  <h3>创建研究项目</h3>
-                  <p>{activeProject?.name ?? "尚未创建项目"}</p>
-                  <button className="ghost-button" type="button" onClick={() => setModal("project")}>
-                    {activeProject ? "新增研究项目" : "创建项目"}
-                  </button>
-                </div>
-                <div className="flow-card">
-                  <span className="step-index">2</span>
-                  <h3>一句话生成画像</h3>
-                  <textarea
-                    value={oneSentence}
-                    onChange={(event) => setOneSentence(event.target.value)}
-                    rows={4}
-                  />
-                  <button
-                    className="primary-button"
-                    type="button"
-                    disabled={!activeProject || busy.profile}
-                    onClick={handleGenerateProfile}
-                  >
-                    {busy.profile ? "生成中..." : "生成画像草稿"}
-                  </button>
-                </div>
-                <div className="flow-card">
-                  <span className="step-index">3</span>
-                  <h3>确认画像</h3>
-                  <p>
-                    {profile
-                      ? `v${profile.version} / ${profile.status} / 置信度 ${Math.round(
-                          profile.confidence * 100
-                        )}%`
-                      : "等待画像草稿"}
-                  </p>
-                  <div className="button-row">
-                    <button
-                      className="ghost-button"
-                      type="button"
-                      disabled={!profileReady}
-                      onClick={() => setModal("profile")}
-                    >
-                      编辑画像
-                    </button>
-                    <button
-                      className="primary-button"
-                      type="button"
-                      disabled={!profileReady || profileConfirmed || busy.confirm}
-                      onClick={handleConfirmProfile}
-                    >
-                      {busy.confirm ? "确认中..." : "确认并生成诊断"}
-                    </button>
-                  </div>
+                <div className="state-badges">
+                  <span className={`state-badge ${profileConfirmed ? "done" : ""}`}>
+                    {profileState(profile)}
+                  </span>
+                  <span className="state-badge">{recommendations.length} 条推荐</span>
                 </div>
               </div>
-              {diagnosis ? (
-                <div className="diagnosis-strip">
-                  <div>
-                    <b>首日诊断</b>
-                    <span>{diagnosis.technical_route}</span>
-                  </div>
-                  <div>
-                    <b>研究空白</b>
-                    <span>{diagnosis.research_gap_candidate}</span>
-                  </div>
-                </div>
-              ) : (
-                <EmptyState text="确认画像后自动生成首日诊断。" />
-              )}
+              <div className="summary-grid">
+                <SummaryItem
+                  icon={Sparkles}
+                  label="首日诊断"
+                  value={diagnosis?.technical_route ?? "确认画像后生成诊断"}
+                />
+                <SummaryItem
+                  icon={Database}
+                  label="研究空白"
+                  value={diagnosis?.research_gap_candidate ?? "等待推荐与反馈"}
+                />
+                <SummaryItem
+                  icon={Activity}
+                  label="最近任务"
+                  value={taskRuns[0]?.message ?? "暂无任务运行记录"}
+                />
+              </div>
             </section>
 
             <section className="panel recommendations">
               <div className="panel-header">
                 <div>
                   <p className="eyebrow">E2E-002</p>
-                  <h2 className="panel-title">检索任务、推荐与反馈纠偏</h2>
+                  <h2 className="panel-title">推荐雷达</h2>
                 </div>
                 <div className="button-row">
                   <button
@@ -663,7 +736,8 @@ export function PhaseOneWorkbench() {
                     disabled={!profileConfirmed || busy.search}
                     onClick={handleSearchLoop}
                   >
-                    {busy.search ? "运行中..." : "生成检索任务"}
+                    {busy.search ? <Loader2 className="spin" size={16} /> : <Zap size={16} />}
+                    {busy.search ? "运行中" : "生成检索"}
                   </button>
                   <button
                     className="ghost-button"
@@ -671,13 +745,15 @@ export function PhaseOneWorkbench() {
                     disabled={!profileConfirmed || busy.recommend}
                     onClick={handleRefreshRecommendations}
                   >
-                    获取推荐
+                    <RefreshCw size={16} />
+                    刷新推荐
                   </button>
                 </div>
               </div>
+
               <div className="task-strip">
                 {searchTasks.length === 0 ? (
-                  <EmptyState text="确认画像后生成精确、扩展、方法迁移三类检索任务。" />
+                  <EmptyState text="确认画像后生成精确、扩展、方法迁移检索任务。" />
                 ) : (
                   searchTasks.map((task) => (
                     <div className="task-chip" key={task.id}>
@@ -687,10 +763,11 @@ export function PhaseOneWorkbench() {
                   ))
                 )}
               </div>
+
               <div className="paper-list">
                 {busy.search || busy.recommend ? <LoadingState text="正在同步推荐结果..." /> : null}
                 {!busy.search && !busy.recommend && visibleRecommendations.length === 0 ? (
-                  <EmptyState text="暂无推荐。请先生成检索任务并获取推荐。" />
+                  <EmptyState text="暂无推荐。请完成画像确认并生成检索。" />
                 ) : (
                   visibleRecommendations.map((recommendation) => (
                     <RecommendationRow
@@ -701,38 +778,42 @@ export function PhaseOneWorkbench() {
                       key={recommendation.id}
                       recommendation={recommendation}
                       onFeedback={handleFeedback}
-                      onSelect={() => setSelectedRecommendationId(recommendation.id)}
+                      onSelect={() => handleSelectRecommendation(recommendation)}
                     />
                   ))
                 )}
               </div>
             </section>
-          </div>
+          </section>
 
-          <div className="two-column-stack">
-            <section className="panel">
-              <div className="panel-header">
-                <h2 className="panel-title">我的研究画像</h2>
+          <aside className="side-column">
+            <section className="panel profile-panel">
+              <div className="panel-header compact">
+                <div>
+                  <p className="eyebrow">E2E-001</p>
+                  <h2 className="panel-title">我的研究画像</h2>
+                </div>
                 <button
-                  className="ghost-button"
+                  className="icon-button"
                   type="button"
-                  disabled={!profileReady}
-                  onClick={() => setModal("profile")}
+                  aria-label={profileReady ? "编辑画像" : "生成画像"}
+                  disabled={!activeProject}
+                  onClick={() => setModal(profileReady ? "profileEdit" : "profileWizard")}
                 >
-                  编辑画像
+                  {profileReady ? <Pencil size={16} /> : <WandSparkles size={16} />}
                 </button>
               </div>
-              {profile ? <ProfileSummary profile={profile} /> : <EmptyState text="尚未生成画像。" />}
+              {profile ? <ProfileSummary profile={profile} /> : <EmptyState text="点击上方按钮生成画像。" />}
             </section>
 
-            <section className="panel">
-              <div className="panel-header">
+            <section className="panel action-panel">
+              <div className="panel-header compact">
                 <div>
                   <p className="eyebrow">E2E-003</p>
-                  <h2 className="panel-title">AI 研读与知识库沉淀</h2>
+                  <h2 className="panel-title">研读与沉淀</h2>
                 </div>
               </div>
-              <div className="profile-body">
+              <div className="profile-body compact">
                 {selectedRecommendation ? (
                   <>
                     <h3 className="paper-title">{selectedRecommendation.paper.title_zh}</h3>
@@ -744,7 +825,8 @@ export function PhaseOneWorkbench() {
                         disabled={busy.analysis}
                         onClick={() => handleAnalysis("quick")}
                       >
-                        AI 快速分析
+                        <Sparkles size={16} />
+                        快速分析
                       </button>
                       <button
                         className="ghost-button"
@@ -752,6 +834,7 @@ export function PhaseOneWorkbench() {
                         disabled={busy.analysis}
                         onClick={() => handleAnalysis("standard")}
                       >
+                        <BookOpen size={16} />
                         标准研读
                       </button>
                       <button
@@ -760,6 +843,7 @@ export function PhaseOneWorkbench() {
                         disabled={busy.knowledge}
                         onClick={() => handleAddKnowledge("read_later")}
                       >
+                        <BookmarkPlus size={16} />
                         加入知识库
                       </button>
                       <button
@@ -768,12 +852,13 @@ export function PhaseOneWorkbench() {
                         disabled={busy.knowledge}
                         onClick={handleKnowledgeSearch}
                       >
+                        <Search size={16} />
                         搜索知识库
                       </button>
                     </div>
                   </>
                 ) : (
-                  <EmptyState text="选择一条推荐后可触发分析和收藏。" />
+                  <EmptyState text="选择一条推荐后可研读和收藏。" />
                 )}
                 {analysis ? (
                   <div className="analysis-box">
@@ -785,14 +870,14 @@ export function PhaseOneWorkbench() {
               </div>
             </section>
 
-            <section className="panel">
-              <div className="panel-header">
-                <h2 className="panel-title">知识库搜索结果</h2>
+            <section className="panel mini-panel">
+              <div className="panel-header compact">
+                <h2 className="panel-title">知识库结果</h2>
                 <span className="relevance">{knowledgeItems.length} 条</span>
               </div>
-              <div className="profile-body">
+              <div className="mini-list">
                 {knowledgeItems.length === 0 ? (
-                  <EmptyState text="加入论文后可按标题、标签、备注搜索。" />
+                  <EmptyState text="加入论文后可搜索。" />
                 ) : (
                   knowledgeItems.map((item) => (
                     <div className="compact-row" key={item.id}>
@@ -805,62 +890,55 @@ export function PhaseOneWorkbench() {
               </div>
             </section>
 
-            <section className="panel">
-              <div className="panel-header">
+            <section className="panel mini-panel">
+              <div className="panel-header compact">
                 <div>
                   <p className="eyebrow">E2E-004</p>
-                  <h2 className="panel-title">日报/周报、消息与邮件</h2>
+                  <h2 className="panel-title">报告与消息</h2>
                 </div>
+                <button
+                  className="icon-button"
+                  type="button"
+                  aria-label="查看报告"
+                  onClick={() => (latestReport ? setModal("report") : handleGenerateReport("daily"))}
+                >
+                  <MessageSquare size={16} />
+                </button>
+              </div>
+              <div className="report-actions">
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={!activeProject || busy.report}
+                  onClick={() => handleGenerateReport("daily")}
+                >
+                  <Bell size={16} />
+                  日报
+                </button>
                 <button
                   className="ghost-button"
                   type="button"
-                  onClick={() => (latestReport ? setModal("report") : handleGenerateReport("daily"))}
+                  disabled={!activeProject || busy.report}
+                  onClick={() => handleGenerateReport("weekly")}
                 >
-                  查看完整报告
+                  <ClipboardList size={16} />
+                  周报
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  disabled={emailPreference?.reports_unsubscribed || busy.message}
+                  onClick={handleUnsubscribeEmail}
+                >
+                  <MailX size={16} />
+                  {emailPreference?.reports_unsubscribed ? "已退订" : "退订"}
                 </button>
               </div>
-              <div className="profile-body">
-                <div className="button-row">
-                  <button
-                    className="primary-button"
-                    type="button"
-                    disabled={!activeProject || busy.report}
-                    onClick={() => handleGenerateReport("daily")}
-                  >
-                    生成日报/站内消息
-                  </button>
-                  <button
-                    className="ghost-button"
-                    type="button"
-                    disabled={!activeProject || busy.report}
-                    onClick={() => handleGenerateReport("weekly")}
-                  >
-                    生成周报
-                  </button>
-                  <button
-                    className="ghost-button"
-                    type="button"
-                    disabled={emailPreference?.reports_unsubscribed || busy.message}
-                    onClick={handleUnsubscribeEmail}
-                  >
-                    {emailPreference?.reports_unsubscribed ? "邮件已退订" : "退订邮件"}
-                  </button>
-                </div>
-                <div className="compact-row">
-                  <b>邮件 outbox</b>
-                  <span>
-                    {latestEmail
-                      ? `${latestEmail.recipient_email} / ${latestEmail.status}`
-                      : emailPreference?.reports_unsubscribed
-                        ? "已退订，后续不生成邮件任务。"
-                        : "暂无邮件任务。"}
-                  </span>
-                  <span>{latestEmail?.failure_reason ?? "dev/mock 邮件边界"}</span>
-                </div>
+              <div className="mini-list">
                 {messages.length === 0 ? (
                   <EmptyState text="暂无站内消息。" />
                 ) : (
-                  messages.slice(0, 3).map((message) => (
+                  messages.slice(0, 2).map((message) => (
                     <button
                       className="message-row"
                       key={message.id}
@@ -875,55 +953,9 @@ export function PhaseOneWorkbench() {
                 )}
               </div>
             </section>
-
-            <section className="panel">
-              <div className="panel-header">
-                <h2 className="panel-title">任务与消耗</h2>
-                <button className="ghost-button" type="button" onClick={() => setModal("quota")}>
-                  去扩容
-                </button>
-              </div>
-              <div className="cost-body">
-                <table className="task-table">
-                  <thead>
-                    <tr>
-                      <th>任务</th>
-                      <th>状态</th>
-                      <th>说明</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {taskRuns.length === 0 ? (
-                      <tr>
-                        <td colSpan={3}>暂无任务运行记录。</td>
-                      </tr>
-                    ) : (
-                      taskRuns.map((task) => (
-                        <tr key={task.task_id}>
-                          <td>{task.type}</td>
-                          <td className={task.status === "succeeded" ? "status-done" : "status-running"}>
-                            {task.status}
-                          </td>
-                          <td>{task.message}</td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </div>
+          </aside>
         </div>
       </section>
-
-      <button
-        className="floating-add"
-        aria-label="新增研究项目"
-        type="button"
-        onClick={() => setModal("project")}
-      >
-        +
-      </button>
 
       {modal === "project" ? (
         <Modal title="新增研究项目" onClose={() => setModal(null)}>
@@ -962,16 +994,47 @@ export function PhaseOneWorkbench() {
                 取消
               </button>
               <button className="primary-button" type="submit" disabled={busy.project}>
-                {busy.project ? "创建中..." : "创建项目"}
+                {busy.project ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
+                创建项目
               </button>
             </div>
           </form>
         </Modal>
       ) : null}
 
-      {modal === "profile" ? (
-        <Modal title="编辑研究画像" onClose={() => setModal(null)}>
-          <form className="modal-form" onSubmit={handleSaveProfile}>
+      {modal === "profileWizard" ? (
+        <Modal title="一句话生成研究画像" onClose={() => setModal(null)}>
+          <form
+            className="modal-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleGenerateProfile();
+            }}
+          >
+            <label>
+              研究方向
+              <textarea
+                value={oneSentence}
+                onChange={(event) => setOneSentence(event.target.value)}
+                rows={5}
+              />
+            </label>
+            <div className="button-row right">
+              <button className="ghost-button" type="button" onClick={() => setModal(null)}>
+                稍后再说
+              </button>
+              <button className="primary-button" type="submit" disabled={!activeProject || busy.profile}>
+                {busy.profile ? <Loader2 className="spin" size={16} /> : <WandSparkles size={16} />}
+                生成画像草稿
+              </button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
+
+      {modal === "profileEdit" ? (
+        <Modal title="编辑并确认研究画像" onClose={() => setModal(null)}>
+          <form className="modal-form profile-edit-form" onSubmit={handleSaveProfile}>
             {Object.entries({
               research_object: "研究对象",
               methods: "方法",
@@ -996,8 +1059,18 @@ export function PhaseOneWorkbench() {
               <button className="ghost-button" type="button" onClick={() => setModal(null)}>
                 取消
               </button>
-              <button className="primary-button" type="submit" disabled={busy.profile}>
-                保存画像
+              <button className="ghost-button" type="submit" disabled={busy.profile}>
+                <Pencil size={16} />
+                保存草稿
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                disabled={!profileReady || profileConfirmed || busy.confirm}
+                onClick={handleSaveAndConfirmProfile}
+              >
+                {busy.confirm ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}
+                确认并生成诊断
               </button>
             </div>
           </form>
@@ -1015,47 +1088,29 @@ export function PhaseOneWorkbench() {
                 <>
                   <p>新增论文：{latestReport.content.new_papers ?? 0}</p>
                   <p>排重后论文：{latestReport.content.deduped_papers ?? 0}</p>
-                  <b>高相关论文</b>
-                  <ul>
-                    {(latestReport.content.high_relevance ?? []).map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                  <b>建议深读</b>
-                  <ul>
-                    {(latestReport.content.suggested_deep_reads ?? []).map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                  <b>方法启发</b>
-                  <ul>
-                    {(latestReport.content.method_inspirations ?? []).map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
+                  <ReportList title="高相关论文" items={latestReport.content.high_relevance ?? []} />
+                  <ReportList
+                    title="建议深读"
+                    items={latestReport.content.suggested_deep_reads ?? []}
+                  />
+                  <ReportList
+                    title="方法启发"
+                    items={latestReport.content.method_inspirations ?? []}
+                  />
                 </>
               ) : (
                 <>
                   <p>知识库增长：{latestReport.content.knowledge_growth ?? 0}</p>
                   <p>{latestReport.content.feedback_changes?.summary ?? "暂无反馈变化。"}</p>
-                  <b>高价值论文</b>
-                  <ul>
-                    {(latestReport.content.high_value_papers ?? []).map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                  <b>趋势</b>
-                  <ul>
-                    {(latestReport.content.trends ?? []).map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                  <b>下周建议</b>
-                  <ul>
-                    {(latestReport.content.next_week_suggestions ?? []).map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
+                  <ReportList
+                    title="高价值论文"
+                    items={latestReport.content.high_value_papers ?? []}
+                  />
+                  <ReportList title="趋势" items={latestReport.content.trends ?? []} />
+                  <ReportList
+                    title="下周建议"
+                    items={latestReport.content.next_week_suggestions ?? []}
+                  />
                 </>
               )}
             </div>
@@ -1072,31 +1127,54 @@ export function PhaseOneWorkbench() {
             <p>剩余额度：{quota?.quota_balance ?? "-"}</p>
             <p>Phase 1 仅展示扩容入口，不接入真实支付或会员体系。</p>
             <button className="primary-button" type="button" disabled title="Phase 1 不进入付费扩容">
+              <CircleSlash2 size={16} />
               付费扩容暂未开放
             </button>
           </div>
-        </Modal>
-      ) : null}
-
-      {modal === "notice" ? (
-        <Modal title="交互说明" onClose={() => setModal(null)}>
-          <p className="modal-copy">{notice}</p>
         </Modal>
       ) : null}
     </main>
   );
 }
 
-function StatusBanner({ text, tone }: { text: string; tone: "info" | "error" }) {
-  return <div className={`status-banner ${tone}`}>{text}</div>;
+function Toast({ toast }: { toast: NonNullable<ToastState> }) {
+  return (
+    <div className={`toast ${toast.tone}`} role="status">
+      {toast.tone === "success" ? <CheckCircle2 size={16} /> : <CircleSlash2 size={16} />}
+      <span>{toast.message}</span>
+    </div>
+  );
 }
 
 function LoadingState({ text }: { text: string }) {
-  return <div className="state-line loading">{text}</div>;
+  return (
+    <div className="state-line loading">
+      <Loader2 className="spin" size={16} />
+      {text}
+    </div>
+  );
 }
 
 function EmptyState({ text }: { text: string }) {
   return <div className="state-line">{text}</div>;
+}
+
+function SummaryItem({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: LucideIcon;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="summary-item">
+      <Icon size={17} aria-hidden="true" />
+      <span>{label}</span>
+      <b>{value}</b>
+    </div>
+  );
 }
 
 function ProfileSummary({ profile }: { profile: ResearchProfile }) {
@@ -1116,7 +1194,7 @@ function ProfileSummary({ profile }: { profile: ResearchProfile }) {
         <div className="profile-row" key={label as string}>
           <span>{label as string}</span>
           <div className="chips">
-            {(values as string[]).map((value, index) => (
+            {(values as string[]).slice(0, 5).map((value, index) => (
               <span className={`chip ${index === 0 ? "strong" : ""}`} key={value}>
                 {value}
               </span>
@@ -1142,6 +1220,11 @@ function RecommendationRow({
   onSelect: () => void;
 }) {
   const feedbackText = feedback ? feedbackLabels[feedback.feedback_type as FeedbackType] : "等待反馈";
+  const explanation = [
+    recommendation.explanation.recommendation_type,
+    recommendation.explanation.topic,
+    recommendation.explanation.method,
+  ].filter(Boolean);
 
   return (
     <article className={`paper-row ${isActive ? "active" : ""}`} onClick={onSelect}>
@@ -1156,7 +1239,7 @@ function RecommendationRow({
         </div>
         <div className="paper-tags">
           <span className="tag">{channelLabels[recommendation.channel]}</span>
-          {Object.values(recommendation.explanation).map((item) => (
+          {explanation.map((item) => (
             <span className="tag" key={item}>
               {item}
             </span>
@@ -1170,39 +1253,53 @@ function RecommendationRow({
           <button
             className="paper-action"
             aria-label="标记高度相关"
+            title="高度相关"
             type="button"
             onClick={(event) => {
               event.stopPropagation();
               onFeedback(recommendation, "very_relevant");
             }}
           >
-            +
+            <CheckCircle2 size={15} />
           </button>
           <button
             className="paper-action"
             aria-label="标记方法可借鉴"
+            title="方法可借鉴"
             type="button"
             onClick={(event) => {
               event.stopPropagation();
               onFeedback(recommendation, "method_useful");
             }}
           >
-            M
+            <Microscope size={15} />
           </button>
           <button
             className="paper-action"
             aria-label="标记不相关"
+            title="不相关"
             type="button"
             onClick={(event) => {
               event.stopPropagation();
               onFeedback(recommendation, "irrelevant");
             }}
           >
-            -
+            <X size={15} />
           </button>
         </div>
       </div>
     </article>
+  );
+}
+
+function ReportList({ items, title }: { items: string[]; title: string }) {
+  return (
+    <>
+      <b>{title}</b>
+      <ul>
+        {items.length === 0 ? <li>暂无</li> : items.map((item) => <li key={item}>{item}</li>)}
+      </ul>
+    </>
   );
 }
 
@@ -1211,7 +1308,7 @@ function Modal({
   onClose,
   title,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   onClose: () => void;
   title: string;
 }) {
@@ -1226,7 +1323,7 @@ function Modal({
         <div className="panel-header">
           <h2 className="panel-title">{title}</h2>
           <button className="icon-button" aria-label="关闭弹窗" type="button" onClick={onClose}>
-            x
+            <X size={17} />
           </button>
         </div>
         <div className="modal-body">{children}</div>
