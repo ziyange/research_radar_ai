@@ -6,6 +6,8 @@ import {
   Bell,
   BookOpen,
   BookmarkPlus,
+  ChevronDown,
+  ChevronRight,
   CheckCircle2,
   CircleSlash2,
   ClipboardList,
@@ -112,8 +114,7 @@ type BusyKey =
   | "report"
   | "message";
 
-const navItems: NavItem[] = [
-  { label: "研究工作台", icon: LayoutDashboard, status: "active" },
+const futureNavItems: NavItem[] = [
   { label: "雷达探索", icon: Radar, status: "future" },
   { label: "论文追踪", icon: FileSearch, status: "future" },
   { label: "知识库", icon: Library, status: "future" },
@@ -183,6 +184,7 @@ export function PhaseOneWorkbench() {
   const [emailOutbox, setEmailOutbox] = useState<EmailOutboxRecord[]>([]);
   const [modal, setModal] = useState<ActiveModal>(null);
   const [toast, setToast] = useState<ToastState>(null);
+  const [workbenchOpen, setWorkbenchOpen] = useState(true);
   const [busy, setBusy] = useState<Partial<Record<BusyKey, boolean>>>({ initial: true });
 
   const [projectForm, setProjectForm] = useState(defaultProject);
@@ -370,7 +372,7 @@ export function PhaseOneWorkbench() {
   async function handleGenerateProfile() {
     if (!activeProject) {
       setModal("project");
-      showAppToast("warning", "请先点击左侧加号新增项目。");
+      showAppToast("warning", "请先在研究工作台下新增项目。");
       return;
     }
     await runAction("profile", async () => {
@@ -591,7 +593,63 @@ export function PhaseOneWorkbench() {
         </div>
 
         <nav className="nav" aria-label="主导航">
-          {navItems.map((item) => {
+          <div className="nav-drawer">
+            <div className="drawer-header">
+              <button
+                className="nav-button active drawer-trigger"
+                type="button"
+                aria-expanded={workbenchOpen}
+                aria-controls="workbench-project-list"
+                onClick={() => setWorkbenchOpen((current) => !current)}
+              >
+                <LayoutDashboard className="nav-icon" aria-hidden="true" size={18} />
+                <span>研究工作台</span>
+                <span className="nav-count">{projects.length}</span>
+                {workbenchOpen ? (
+                  <ChevronDown aria-hidden="true" size={16} />
+                ) : (
+                  <ChevronRight aria-hidden="true" size={16} />
+                )}
+              </button>
+              <button
+                className="icon-button drawer-add"
+                aria-label="新增项目"
+                type="button"
+                onClick={() => setModal("project")}
+              >
+                <Plus size={16} />
+              </button>
+            </div>
+
+            {workbenchOpen ? (
+              <div className="workbench-drawer" id="workbench-project-list">
+                <div className="project-list">
+                  {projects.length === 0 ? (
+                    <p className="empty-copy">暂无项目，点击工作台右侧 + 添加课题。</p>
+                  ) : (
+                    projects.map((project) => (
+                      <button
+                        className={`project-button ${
+                          project.id === activeProjectId ? "active" : ""
+                        }`}
+                        key={project.id}
+                        type="button"
+                        onClick={() => {
+                          void handleSelectProject(project);
+                        }}
+                      >
+                        <span className="paper-dot" />
+                        <span className="project-name">{project.name}</span>
+                        <span className="project-count">{project.status}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          {futureNavItems.map((item) => {
             const Icon = item.icon;
             const isFuture = item.status === "future";
             return (
@@ -608,41 +666,6 @@ export function PhaseOneWorkbench() {
             );
           })}
         </nav>
-
-        <section className="project-section">
-          <div className="section-parent">研究工作台</div>
-          <div className="section-label">
-            <span>当前项目</span>
-            <button
-              className="icon-button"
-              aria-label="新增项目"
-              type="button"
-              onClick={() => setModal("project")}
-            >
-              <Plus size={18} />
-            </button>
-          </div>
-          <div className="project-list">
-            {projects.length === 0 ? (
-              <p className="empty-copy">暂无项目。使用上方加号添加课题。</p>
-            ) : (
-              projects.map((project) => (
-                <button
-                  className={`project-button ${project.id === activeProjectId ? "active" : ""}`}
-                  key={project.id}
-                  type="button"
-                  onClick={() => {
-                    void handleSelectProject(project);
-                  }}
-                >
-                  <span className="paper-dot" />
-                  <span className="project-name">{project.name}</span>
-                  <span className="project-count">{project.status}</span>
-                </button>
-              ))
-            )}
-          </div>
-        </section>
 
         <div className="sidebar-spacer" />
         <div className="bottom-nav">
@@ -687,7 +710,7 @@ export function PhaseOneWorkbench() {
             <section className="empty-project-panel">
               <LayoutDashboard size={28} aria-hidden="true" />
               <h2>当前没有项目</h2>
-              <p>请使用左侧“当前项目”旁的加号添加课题。</p>
+              <p>请展开左侧“研究工作台”，点击项目旁的加号添加课题。</p>
             </section>
           </div>
         ) : (

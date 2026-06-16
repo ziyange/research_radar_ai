@@ -117,7 +117,8 @@ input:focus {
 
 .nav,
 .project-list,
-.bottom-nav {
+.bottom-nav,
+.nav-drawer {
   display: grid;
   gap: 7px;
 }
@@ -152,6 +153,17 @@ input:focus {
   text-align: left;
 }
 
+.drawer-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+  align-items: center;
+}
+
+.drawer-trigger {
+  min-width: 0;
+}
+
 .nav-button.active,
 .nav-button:not(:disabled):hover,
 .project-button:hover,
@@ -176,28 +188,29 @@ input:focus {
   white-space: nowrap;
 }
 
-.project-section {
-  min-height: 0;
-  border-top: 1px solid var(--line);
-  padding-top: 16px;
-  padding-left: 8px;
-  border-left: 2px solid var(--accent-soft);
-}
-
-.section-parent {
-  margin: 0 4px 8px;
+.nav-count {
+  margin-left: auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: rgba(255, 255, 255, 0.7);
   color: var(--accent-dark);
   font-size: 11px;
   font-weight: 800;
 }
 
-.section-label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin: 0 4px 10px;
-  color: var(--muted);
-  font-size: 12px;
+.workbench-drawer {
+  margin-left: 18px;
+  padding: 3px 0 2px 12px;
+  border-left: 2px solid var(--accent-soft);
+  display: grid;
+  gap: 8px;
+}
+
+.drawer-add {
+  width: 34px;
+  min-height: 40px;
+  color: var(--accent-dark);
+  background: var(--accent-soft);
 }
 
 .project-name {
