@@ -12,7 +12,6 @@ import {
   CreditCard,
   Database,
   FileSearch,
-  FolderKanban,
   Inbox,
   LayoutDashboard,
   Library,
@@ -114,10 +113,9 @@ type BusyKey =
   | "message";
 
 const navItems: NavItem[] = [
-  { label: "工作台", icon: LayoutDashboard, status: "active" },
+  { label: "研究工作台", icon: LayoutDashboard, status: "active" },
   { label: "雷达探索", icon: Radar, status: "future" },
   { label: "论文追踪", icon: FileSearch, status: "future" },
-  { label: "项目管理", icon: FolderKanban, status: "future" },
   { label: "知识库", icon: Library, status: "future" },
   { label: "消息中心", icon: Inbox, status: "future" },
 ];
@@ -333,8 +331,6 @@ export function PhaseOneWorkbench() {
       setActiveProjectId(firstProject?.id ?? null);
       if (firstProject) {
         await loadProjectContext(firstProject);
-      } else {
-        setModal("project");
       }
     });
   }, [loadProjectContext, runAction]);
@@ -614,8 +610,9 @@ export function PhaseOneWorkbench() {
         </nav>
 
         <section className="project-section">
+          <div className="section-parent">研究工作台</div>
           <div className="section-label">
-            <span>我的项目</span>
+            <span>当前项目</span>
             <button
               className="icon-button"
               aria-label="新增项目"
@@ -627,7 +624,7 @@ export function PhaseOneWorkbench() {
           </div>
           <div className="project-list">
             {projects.length === 0 ? (
-              <p className="empty-copy">点击右上角加号创建第一个课题。</p>
+              <p className="empty-copy">暂无项目。使用上方加号添加课题。</p>
             ) : (
               projects.map((project) => (
                 <button
@@ -663,14 +660,10 @@ export function PhaseOneWorkbench() {
 
       <section className="main">
         <header className="topbar">
-          <label className="search">
-            <Search size={17} aria-hidden="true" />
-            <input
-              placeholder="搜索推荐、知识库标签、关键词..."
-              value={knowledgeQuery}
-              onChange={(event) => setKnowledgeQuery(event.target.value)}
-            />
-          </label>
+          <div className="context-title">
+            <span>研究工作台 / 当前项目</span>
+            <strong>{activeProject?.name ?? "当前没有项目"}</strong>
+          </div>
           <div className="quota">
             <strong>额度 {quota?.quota_balance ?? "-"}</strong>
             <div className="quota-bar" aria-hidden="true">
@@ -689,13 +682,22 @@ export function PhaseOneWorkbench() {
           </div>
         </header>
 
-        <div className="workspace">
-          <section className="radar-column">
+        {!activeProject ? (
+          <div className="workspace empty-workspace">
+            <section className="empty-project-panel">
+              <LayoutDashboard size={28} aria-hidden="true" />
+              <h2>当前没有项目</h2>
+              <p>请使用左侧“当前项目”旁的加号添加课题。</p>
+            </section>
+          </div>
+        ) : (
+          <div className="workspace">
+            <section className="radar-column">
             <section className="panel compact-panel">
               <div className="panel-header compact">
                 <div>
-                  <p className="eyebrow">Phase 1 工作台</p>
-                  <h2 className="panel-title">{activeProject?.name ?? "尚未选择研究项目"}</h2>
+                  <p className="eyebrow">当前项目</p>
+                  <h2 className="panel-title">{activeProject.name}</h2>
                 </div>
                 <div className="state-badges">
                   <span className={`state-badge ${profileConfirmed ? "done" : ""}`}>
@@ -727,9 +729,17 @@ export function PhaseOneWorkbench() {
               <div className="panel-header">
                 <div>
                   <p className="eyebrow">E2E-002</p>
-                  <h2 className="panel-title">推荐雷达</h2>
+                  <h2 className="panel-title">项目推荐列表</h2>
                 </div>
-                <div className="button-row">
+                <div className="panel-tools">
+                  <label className="panel-search">
+                    <Search size={15} aria-hidden="true" />
+                    <input
+                      placeholder="筛选推荐与知识库"
+                      value={knowledgeQuery}
+                      onChange={(event) => setKnowledgeQuery(event.target.value)}
+                    />
+                  </label>
                   <button
                     className="primary-button"
                     type="button"
@@ -784,9 +794,9 @@ export function PhaseOneWorkbench() {
                 )}
               </div>
             </section>
-          </section>
+            </section>
 
-          <aside className="side-column">
+            <aside className="side-column">
             <section className="panel profile-panel">
               <div className="panel-header compact">
                 <div>
@@ -909,6 +919,7 @@ export function PhaseOneWorkbench() {
                 <button
                   className="primary-button"
                   type="button"
+                  aria-label="生成日报"
                   disabled={!activeProject || busy.report}
                   onClick={() => handleGenerateReport("daily")}
                 >
@@ -918,6 +929,7 @@ export function PhaseOneWorkbench() {
                 <button
                   className="ghost-button"
                   type="button"
+                  aria-label="生成周报"
                   disabled={!activeProject || busy.report}
                   onClick={() => handleGenerateReport("weekly")}
                 >
@@ -953,8 +965,9 @@ export function PhaseOneWorkbench() {
                 )}
               </div>
             </section>
-          </aside>
-        </div>
+            </aside>
+          </div>
+        )}
       </section>
 
       {modal === "project" ? (

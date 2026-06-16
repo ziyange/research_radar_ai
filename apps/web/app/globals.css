@@ -180,6 +180,15 @@ input:focus {
   min-height: 0;
   border-top: 1px solid var(--line);
   padding-top: 16px;
+  padding-left: 8px;
+  border-left: 2px solid var(--accent-soft);
+}
+
+.section-parent {
+  margin: 0 4px 8px;
+  color: var(--accent-dark);
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .section-label {
@@ -226,7 +235,7 @@ input:focus {
   height: 66px;
   flex: 0 0 66px;
   display: grid;
-  grid-template-columns: minmax(260px, 520px) 1fr auto;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
   align-items: center;
   gap: 18px;
   padding: 12px 22px;
@@ -234,7 +243,27 @@ input:focus {
   background: rgba(255, 255, 255, 0.92);
 }
 
-.search {
+.context-title {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.context-title span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.context-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+}
+
+.search,
+.panel-search {
   height: 40px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -246,10 +275,26 @@ input:focus {
   color: var(--muted);
 }
 
-.search input {
+.search input,
+.panel-search input {
   border: 0;
   padding: 0;
   box-shadow: none;
+}
+
+.panel-tools {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.panel-search {
+  width: 220px;
+  height: 34px;
+  padding: 0 10px;
 }
 
 .quota {
@@ -300,6 +345,38 @@ input:focus {
   gap: 14px;
   padding: 14px 18px 18px;
   overflow: hidden;
+}
+
+.empty-workspace {
+  grid-template-columns: 1fr;
+  place-items: center;
+}
+
+.empty-project-panel {
+  width: min(520px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 34px;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.empty-project-panel svg {
+  color: var(--accent);
+}
+
+.empty-project-panel h2,
+.empty-project-panel p {
+  margin: 0;
+}
+
+.empty-project-panel p {
+  color: var(--muted);
+  font-size: 14px;
 }
 
 .radar-column,
@@ -857,6 +934,14 @@ input:focus {
   .topbar {
     height: auto;
     grid-template-columns: 1fr;
+  }
+
+  .panel-tools {
+    justify-content: flex-start;
+  }
+
+  .panel-search {
+    width: 100%;
   }
 
   .quota {
