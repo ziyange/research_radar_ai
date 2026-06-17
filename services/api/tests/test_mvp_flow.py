@@ -3,6 +3,8 @@ import os
 from fastapi.testclient import TestClient
 
 os.environ["RETRIEVAL_PROVIDER"] = "mock"
+os.environ["DEMO_SEED_ENABLED"] = "true"
+os.environ["DEV_USER_ID"] = "usr_demo"
 
 from research_radar_api.main import app
 
@@ -76,6 +78,9 @@ def test_search_recommend_feedback_analysis_knowledge_report_flow():
     task_status = unwrap(client.post(f"/api/v1/search-tasks/{tasks[0]['id']}:run"))
     assert task_status["status"] == "succeeded"
     assert {item["source"] for item in task_status["source_statuses"]} >= {"openalex", "crossref"}
+    bridged_status = unwrap(client.get(f"/api/v1/tasks/{tasks[0]['id']}"))
+    assert bridged_status["task_id"] == tasks[0]["id"]
+    assert bridged_status["source_statuses"]
     source_records = unwrap(client.get(f"/api/v1/search-tasks/{tasks[0]['id']}/source-records"))
     assert {record["source"] for record in source_records} >= {"openalex", "crossref"}
     assert all(record["paper_id"] for record in source_records)

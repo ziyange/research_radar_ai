@@ -33,6 +33,8 @@
 | [09-roadmap.md](./09-roadmap.md) | MVP 到机构版的阶段目标 | 产品、管理、研发 |
 | [10-risk-compliance.md](./10-risk-compliance.md) | 数据合规、版权、AI 幻觉、成本风险 | 产品、法务、研发 |
 | [11-future-capability-backlog.md](./11-future-capability-backlog.md) | 原始方案中未进入 MVP 的长期能力追踪 | 产品、研发、管理 |
+| [RR-DEV-008-gap-audit.md](./RR-DEV-008-gap-audit.md) | Phase 1 已实现/未实现、真实通信/mock 边界和后续缺口 | 产品、研发、测试 |
+| [RR-DEV-008-report.md](./RR-DEV-008-report.md) | RR-DEV-008 修复内容、验收命令和浏览器证据 | 产品、研发、测试 |
 
 ## 3. 需求编号规则
 

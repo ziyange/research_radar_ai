@@ -1,9 +1,10 @@
+import json
 import re
 from typing import Any
 
 import httpx
 
-from .schemas import AnalysisClaim, ClaimEvidence, Paper, ResearchProfile
+from .schemas import AnalysisClaim, ClaimEvidence, Paper, ResearchProfile, ResearchProject
 from .settings import Settings
 
 
@@ -16,11 +17,73 @@ FACT_LEVELS = {
 }
 
 DOI_PATTERN = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE)
+JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+
+
+class AiProviderConfigError(RuntimeError):
+    pass
+
+
+class AiOutputValidationError(RuntimeError):
+    pass
+
+
+def extract_json_object(content: str) -> dict[str, Any]:
+    match = JSON_BLOCK_PATTERN.search(content)
+    source = match.group(1) if match else content.strip()
+    try:
+        payload = json.loads(source)
+    except json.JSONDecodeError as exc:
+        raise AiOutputValidationError("AI output is not valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise AiOutputValidationError("AI output JSON must be an object.")
+    return payload
 
 
 class AiProvider:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+
+    def ensure_configured(self) -> None:
+        if self.settings.ai_provider != "openai":
+            return
+        if not self.settings.openai_api_key:
+            raise AiProviderConfigError("OPENAI_API_KEY is required when AI_PROVIDER=openai.")
+        if not self.settings.openai_base_url:
+            raise AiProviderConfigError("OPENAI_BASE_URL is required when AI_PROVIDER=openai.")
+        if not self.settings.openai_model:
+            raise AiProviderConfigError("OPENAI_MODEL is required when AI_PROVIDER=openai.")
+
+    async def generate_profile_payload(
+        self,
+        project: ResearchProject,
+        one_sentence: str,
+    ) -> dict[str, Any]:
+        if self.settings.ai_provider == "openai":
+            self.ensure_configured()
+            prompt = (
+                "你是科研画像生成助手。请只输出 JSON object，不要 Markdown。"
+                "字段必须包含：discipline, subfield, research_object, research_questions, goals, "
+                "methods, materials, reagents, metrics, mechanisms, applications, keywords_zh, "
+                "keywords_en, synonyms, exclusions, confidence。"
+                "所有列表字段必须是字符串数组；confidence 为 0 到 1 的数字。"
+                f"\n项目名称: {project.name}"
+                f"\n学科: {project.discipline or '未知'}"
+                f"\n项目描述: {project.description or '无'}"
+                f"\n一句话研究方向: {one_sentence}"
+            )
+            content = await self._chat_completion(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "你只输出可被 json.loads 解析的 JSON，不输出解释。",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+            )
+            return extract_json_object(content)
+        return self._mock_profile_payload(one_sentence, project.discipline)
 
     async def analyze_paper(
         self,
@@ -29,7 +92,8 @@ class AiProvider:
         analysis_type: str,
         input_scope: str,
     ) -> dict[str, Any]:
-        if self.settings.ai_provider == "openai" and self.settings.openai_api_key:
+        if self.settings.ai_provider == "openai":
+            self.ensure_configured()
             return await self._openai_compatible_analysis(
                 paper=paper,
                 profile=profile,
@@ -37,6 +101,42 @@ class AiProvider:
                 input_scope=input_scope,
             )
         return self._mock_analysis(paper, profile, analysis_type, input_scope)
+
+    def _mock_profile_payload(
+        self,
+        text: str,
+        discipline: str | None,
+    ) -> dict[str, Any]:
+        is_bamboo = "竹" in text or "bamboo" in text.lower()
+        return {
+            "discipline": discipline or "材料科学",
+            "subfield": "生物质材料" if is_bamboo else "待确认方向",
+            "research_object": ["脱木质素竹片"] if is_bamboo else ["用户描述的研究对象"],
+            "research_questions": ["改性方法如何影响材料性能", "哪些文献最接近当前技术路线"],
+            "goals": ["找到高相关论文", "沉淀可追溯科研证据", "发现可验证研究空白"],
+            "methods": ["高碘酸钠氧化", "二胺改性", "热压"] if is_bamboo else ["文献检索", "方法迁移"],
+            "materials": ["脱木质素竹片", "生物质材料", "纤维素基材料"] if is_bamboo else ["目标材料"],
+            "reagents": ["高碘酸钠", "二胺"] if is_bamboo else [],
+            "metrics": ["力学性能", "界面结合", "热稳定性"],
+            "mechanisms": ["醛基-胺基反应", "界面交联"] if is_bamboo else [],
+            "applications": ["热压材料", "可持续复合材料"] if is_bamboo else [],
+            "keywords_zh": ["脱木质素竹材", "高碘酸钠氧化", "二胺改性", "热压"]
+            if is_bamboo
+            else [text[:20]],
+            "keywords_en": [
+                "delignified bamboo",
+                "sodium periodate oxidation",
+                "diamine modification",
+                "hot pressing",
+            ]
+            if is_bamboo
+            else [],
+            "synonyms": ["periodate oxidation", "aldehyde cellulose", "biomass composite"]
+            if is_bamboo
+            else [],
+            "exclusions": ["无化学改性的竹材应用", "纯木塑复合材料"] if is_bamboo else [],
+            "confidence": 0.82 if is_bamboo else 0.68,
+        }
 
     def _mock_analysis(
         self,
@@ -123,23 +223,50 @@ class AiProvider:
         input_scope: str,
     ) -> dict[str, Any]:
         prompt = (
-            "你是科研文献分析助手。请用 JSON 输出中文题名、一句话结论、中文摘要、"
-            "与用户研究方向的关系、是否值得深读，并区分事实与启发。"
+            "你是科研文献分析助手。请只输出 JSON object，不要 Markdown。"
+            "JSON 必须包含 result 和 claims。result 必须包含 title_zh, one_sentence_conclusion, "
+            "summary_zh, relation_to_project, recommendation_level, worth_deep_reading, "
+            "borrowable_content。claims 必须是数组，每项包含 claim, fact_level, evidence；"
+            "fact_level 只能是 source_explicit, ai_summary, cross_paper_comparison, "
+            "ai_inference, research_inspiration；evidence 包含 paper_id, section, quote, traceable。"
+            "不得虚构 DOI；证据不足时 traceable=false。"
             f"\n论文标题: {paper.title}\n摘要: {paper.abstract or '无'}"
+            f"\n论文ID: {paper.id}\n论文DOI: {paper.doi or '无'}"
             f"\n用户画像: {profile.model_dump_json() if profile else '无'}"
             f"\n分析类型: {analysis_type}; 输入范围: {input_scope}"
         )
+        content = await self._chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你只输出可被 json.loads 解析的 JSON，不输出解释。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        payload = extract_json_object(content)
+        if not isinstance(payload.get("result"), dict) or not isinstance(payload.get("claims"), list):
+            raise AiOutputValidationError("AI analysis output must contain result and claims.")
+        return {
+            "result": payload["result"],
+            "claims": payload["claims"],
+            "model": self.settings.openai_model,
+        }
+
+    async def _chat_completion(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float,
+    ) -> str:
         headers = {
             "Authorization": f"Bearer {self.settings.openai_api_key}",
             "Content-Type": "application/json",
         }
         payload = {
             "model": self.settings.openai_model,
-            "messages": [
-                {"role": "system", "content": "只输出简洁中文分析，避免虚构 DOI。"},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.2,
+            "messages": messages,
+            "temperature": temperature,
         }
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
@@ -149,24 +276,9 @@ class AiProvider:
             )
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
-
-        claim = AnalysisClaim(
-            claim="模型已基于论文元数据和用户画像生成分析，需人工核验关键科研判断。",
-            fact_level="ai_summary",
-            evidence=ClaimEvidence(paper_id=paper.id, section=input_scope, traceable=False),
-        )
-        return {
-            "result": {
-                "title_zh": paper.title_zh,
-                "one_sentence_conclusion": content[:160],
-                "summary_zh": content,
-                "relation_to_project": "由模型基于画像判断",
-                "recommendation_level": "model_generated",
-                "worth_deep_reading": True,
-            },
-            "claims": [claim.model_dump(mode="json")],
-            "model": self.settings.openai_model,
-        }
+        if not isinstance(content, str):
+            raise AiOutputValidationError("AI response content must be a string.")
+        return content
 
 
 def validate_analysis_safety(

@@ -51,8 +51,9 @@ class InMemoryStore:
     a persistence change, not an API redesign.
     """
 
-    def __init__(self, database_url: str | None = None, seed_on_empty: bool = True) -> None:
-        self.persistence = EntityPersistence(database_url or get_settings().database_url)
+    def __init__(self, database_url: str | None = None, seed_on_empty: bool | None = None) -> None:
+        settings = get_settings()
+        self.persistence = EntityPersistence(database_url or settings.database_url)
         self.users: dict[str, User] = PersistDict("users", self.persist_entity)
         self.projects: dict[str, ResearchProject] = PersistDict("projects", self.persist_entity)
         self.profiles: dict[str, ResearchProfile] = PersistDict("profiles", self.persist_entity)
@@ -83,7 +84,8 @@ class InMemoryStore:
         self.tasks: dict[str, TaskStatus] = PersistDict("tasks", self.persist_entity)
         self.audit_logs: dict[str, AuditLog] = PersistDict("audit_logs", self.persist_entity)
         loaded = self.load_persisted_entities()
-        if seed_on_empty and not loaded:
+        should_seed = settings.demo_seed_enabled if seed_on_empty is None else seed_on_empty
+        if should_seed and not loaded:
             self.seed()
 
     def persist_entity(self, entity_type: str, entity: Any) -> None:
@@ -361,6 +363,8 @@ class InMemoryStore:
             if source.search_task_id in task_ids and source.paper_id
         }
         if not paper_ids:
+            if get_settings().retrieval_provider != "mock":
+                return []
             return list(self.papers.values())
         return [paper for paper in self.papers.values() if paper.id in paper_ids]
 
@@ -391,6 +395,9 @@ class InMemoryStore:
                 self.recommendations[recommendation.id] = recommendation
             return created
 
+        if get_settings().retrieval_provider != "mock":
+            return []
+
         ranked_papers = [
             ("paper_bamboo_oxidation", "exact", 0.96),
             ("paper_cellulose_network", "exact", 0.91),
@@ -400,6 +407,8 @@ class InMemoryStore:
         ]
         created: list[Recommendation] = []
         for rank, (paper_id, channel, score) in enumerate(ranked_papers, start=1):
+            if paper_id not in self.papers:
+                continue
             paper = self.papers[paper_id]
             recommendation = Recommendation(
                 id=make_id("rec"),

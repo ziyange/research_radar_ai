@@ -1,5 +1,6 @@
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8010/api/v1";
+const DEV_USER_ID = process.env.NEXT_PUBLIC_DEV_USER_ID;
 
 type ApiEnvelope<T> = {
   request_id: string;
@@ -91,6 +92,37 @@ export type TaskStatus = {
   retry_count: number;
   error_code: string | null;
   message: string | null;
+  degraded: boolean;
+  source_statuses: Array<{
+    source: string;
+    status: string;
+    record_count: number;
+    elapsed_ms: number | null;
+    error_code: string | null;
+    error_message: string | null;
+    fallback_reason: string | null;
+  }>;
+};
+
+export type SourceRecord = {
+  id: string;
+  source: "openalex" | "crossref" | "semantic_scholar" | "arxiv";
+  source_identifier: string;
+  search_task_id: string;
+  raw_payload: Record<string, unknown>;
+  normalized_payload: {
+    title?: string;
+    authors?: string[];
+    year?: number | null;
+    journal?: string | null;
+    doi?: string | null;
+    keywords?: string[];
+    open_access?: boolean;
+    fulltext_url?: string | null;
+  } | null;
+  fetched_at: string;
+  quality_score: number;
+  paper_id: string | null;
 };
 
 export type Recommendation = {
@@ -251,6 +283,26 @@ export type CostRecord = {
   quota_delta: number;
 };
 
+export type HealthStatus = {
+  status: "ok";
+  app_env: string;
+  ai_provider: "mock" | "openai";
+  ai?: {
+    provider: "mock" | "openai";
+    model: string;
+    configured: boolean;
+    base_url_host: string | null;
+  };
+  retrieval_provider: "mock" | "live";
+  demo_seed_enabled: boolean;
+  database: {
+    configured: boolean;
+    driver: string;
+    detail: string;
+    pgvector: boolean;
+  };
+};
+
 export type Diagnosis = {
   requirement_id: string;
   understanding: {
@@ -274,7 +326,9 @@ export type RecommendationList = {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
-  headers.set("x-user-id", "usr_demo");
+  if (DEV_USER_ID) {
+    headers.set("x-user-id", DEV_USER_ID);
+  }
   if (!(options.body instanceof FormData)) {
     headers.set("content-type", "application/json");
   }
@@ -302,6 +356,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  health: () => request<HealthStatus>("/health"),
   me: () => request<User>("/me"),
   quota: () => request<{ quota_balance: number; plan: User["plan"] }>("/me/quota"),
   costs: () => request<CostRecord[]>("/me/costs"),
@@ -357,10 +412,14 @@ export const api = {
     request<SearchTask[]>(`/projects/${projectId}/search-tasks:generate`, {
       method: "POST",
     }),
+  searchTasks: (projectId: string) => request<SearchTask[]>(`/projects/${projectId}/search-tasks`),
   runSearchTask: (taskId: string) =>
     request<TaskStatus>(`/search-tasks/${taskId}:run`, {
       method: "POST",
     }),
+  taskStatus: (taskId: string) => request<TaskStatus>(`/tasks/${taskId}`),
+  sourceRecords: (taskId: string) =>
+    request<SourceRecord[]>(`/search-tasks/${taskId}/source-records`),
   recommendations: (projectId: string) =>
     request<RecommendationList>(`/projects/${projectId}/recommendations`),
   refreshRecommendations: (projectId: string) =>

@@ -2,8 +2,10 @@ import asyncio
 
 from research_radar_api.main import run_retrieval_adapter
 from research_radar_api.retrieval import NormalizedRecord
-from research_radar_api.schemas import SearchTask
+from research_radar_api.schemas import ResearchProfile, ResearchProject, SearchTask
 from research_radar_api.settings import Settings
+from research_radar_api.store import InMemoryStore
+from research_radar_api import store as store_module
 
 
 class FailingAdapter:
@@ -28,7 +30,7 @@ class SuccessfulAdapter:
         ]
 
 
-def test_adapter_failure_records_source_and_uses_source_fallback():
+def test_live_adapter_failure_records_source_without_fallback_data():
     task = SearchTask(
         id="search_test_degrade",
         project_id="proj_test",
@@ -39,13 +41,13 @@ def test_adapter_failure_records_source_and_uses_source_fallback():
     result = asyncio.run(run_retrieval_adapter(FailingAdapter(), task, Settings()))
 
     assert result.source == "openalex"
-    assert result.status == "degraded"
+    assert result.status == "failed"
     assert result.error_code == "TimeoutError"
-    assert result.fallback_reason
-    assert {record.source for record in result.records} == {"openalex"}
+    assert result.fallback_reason is None
+    assert result.records == []
     payload = result.status_payload()
     assert payload["source"] == "openalex"
-    assert payload["record_count"] == 1
+    assert payload["record_count"] == 0
 
 
 def test_adapter_success_is_not_affected_by_other_source_contract():
@@ -62,3 +64,39 @@ def test_adapter_success_is_not_affected_by_other_source_contract():
     assert result.status == "succeeded"
     assert result.error_code is None
     assert len(result.records) == 1
+
+
+def test_live_recommendations_do_not_use_seed_fallback(monkeypatch):
+    monkeypatch.setattr(
+        store_module,
+        "get_settings",
+        lambda: Settings(
+            database_url="sqlite+memory://unit",
+            retrieval_provider="live",
+            demo_seed_enabled=True,
+        ),
+    )
+    local_store = InMemoryStore(database_url="sqlite+memory://unit", seed_on_empty=True)
+    project = ResearchProject(
+        id="proj_live_no_records",
+        owner_id="usr_demo",
+        name="真实检索无结果项目",
+    )
+    profile = ResearchProfile(
+        id="profile_live_no_records",
+        project_id=project.id,
+        version=1,
+        status="confirmed",
+        source_type="manual",
+        research_object=["target material"],
+        methods=["target method"],
+        materials=["target material"],
+        metrics=["target metric"],
+        keywords_en=["target material target method"],
+    )
+    project.current_profile_id = profile.id
+    local_store.projects[project.id] = project
+    local_store.profiles[profile.id] = profile
+
+    assert local_store.project_papers(project.id) == []
+    assert local_store.create_recommendations(project.id, profile.id, force_refresh=True) == []

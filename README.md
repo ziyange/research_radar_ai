@@ -36,8 +36,21 @@ uv sync --dev
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 - `AI_PROVIDER`
+- `DEMO_SEED_ENABLED`
+- `DEV_USER_ID`
 
-默认 `AI_PROVIDER=mock`，不会调用真实 AI API。你填入配置并切换 provider 后，后端再走 OpenAI 兼容接口。
+默认 `AI_PROVIDER=mock`，不会调用真实 AI API。要接入阿里云百炼，使用 OpenAI-compatible 模式，不需要新增 `DASHSCOPE_*` 变量：
+
+```text
+AI_PROVIDER=openai
+OPENAI_BASE_URL=https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+OPENAI_MODEL=qwen3.6-plus
+OPENAI_API_KEY=你的百炼 API Key
+```
+
+`AI_PROVIDER=openai` 时如果缺少 key、base URL 或 model，接口会返回 `AI_PROVIDER_CONFIG_MISSING`，不会静默回退 mock。
+
+`DEMO_SEED_ENABLED=false` 是真实业务默认值，不会初始化 demo 论文。开发演示或本地 smoke flow 可显式改为 `true`。`DEV_USER_ID=usr_demo` 仅用于开发环境免登录；生产环境应接入正式认证，不依赖该值。
 
 Phase 1 默认验收全部使用 mock AI，不需要也不读取真实 OpenAI Key。
 
@@ -174,6 +187,8 @@ Copy-Item .env.example .env
 $env:AI_PROVIDER="mock"
 $env:RETRIEVAL_PROVIDER="mock"
 $env:DATABASE_URL="sqlite+memory://dev"
+$env:DEMO_SEED_ENABLED="true"
+$env:DEV_USER_ID="usr_demo"
 uv run uvicorn research_radar_api.main:app --reload --host 127.0.0.1 --port 8010 --app-dir services/api/src
 ```
 
@@ -181,6 +196,12 @@ uv run uvicorn research_radar_api.main:app --reload --host 127.0.0.1 --port 8010
 
 ```powershell
 npm run dev:web
+```
+
+如未复制 `apps/web/.env.example`，前端本地免登录 smoke 需要设置：
+
+```powershell
+$env:NEXT_PUBLIC_DEV_USER_ID="usr_demo"
 ```
 
 访问：

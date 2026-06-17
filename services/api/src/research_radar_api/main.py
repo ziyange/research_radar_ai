@@ -9,8 +9,14 @@ import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
-from .ai import AiProvider, validate_analysis_safety
+from .ai import (
+    AiOutputValidationError,
+    AiProvider,
+    AiProviderConfigError,
+    validate_analysis_safety,
+)
 from .db import database_health
 from .notifications import publish_report_notifications
 from .retrieval import (
@@ -106,7 +112,12 @@ def envelope(request: Request, data: Any) -> dict[str, Any]:
 
 
 def current_user(request: Request) -> User:
-    user_id = request.headers.get("x-user-id", "usr_demo")
+    settings = get_settings()
+    user_id = request.headers.get("x-user-id")
+    if not user_id and settings.app_env == "development":
+        user_id = settings.dev_user_id
+    if not user_id:
+        raise HTTPException(status_code=401, detail="AUTH_REQUIRED")
     user = store.users.get(user_id)
     if not user:
         raise HTTPException(status_code=401, detail="UNAUTHORIZED")
@@ -130,6 +141,16 @@ def health(request: Request, settings: Settings = Depends(get_settings)):
             "status": "ok",
             "app_env": settings.app_env,
             "ai_provider": settings.ai_provider,
+            "ai": {
+                "provider": settings.ai_provider,
+                "model": settings.openai_model if settings.ai_provider == "openai" else "mock-research-radar",
+                "configured": settings.ai_configured,
+                "base_url_host": settings.openai_base_url_host
+                if settings.ai_provider == "openai"
+                else None,
+            },
+            "retrieval_provider": settings.retrieval_provider,
+            "demo_seed_enabled": settings.demo_seed_enabled,
             "database": asdict(database_health(settings.database_url)),
             "requirements": ["RR-MVP-001", "RR-MVP-034"],
             "time": datetime.now(timezone.utc).isoformat(),
@@ -220,57 +241,94 @@ def archive_project(project_id: str, request: Request, user: User = Depends(curr
     return envelope(request, project)
 
 
-def build_profile(project: ResearchProject, payload: ProfileGenerateRequest) -> ResearchProfile:
-    text = payload.one_sentence
-    is_bamboo = "竹" in text or "bamboo" in text.lower()
-    methods = ["高碘酸钠氧化", "二胺改性", "热压"] if is_bamboo else ["文献检索", "方法迁移"]
-    materials = ["脱木质素竹片", "生物质材料", "纤维素基材料"] if is_bamboo else ["目标材料"]
+def profile_from_payload(
+    project: ResearchProject,
+    source_payload: dict[str, Any],
+    source_type: str,
+) -> ResearchProfile:
     existing_versions = [item.version for item in store.profiles.values() if item.project_id == project.id]
     return ResearchProfile(
         id=make_id("profile"),
         project_id=project.id,
         version=(max(existing_versions) + 1) if existing_versions else 1,
-        source_type="one_sentence",
-        discipline=project.discipline or "材料科学",
-        subfield="生物质材料",
-        research_object=["脱木质素竹片"] if is_bamboo else ["用户描述的研究对象"],
-        research_questions=["改性方法如何影响材料性能", "哪些文献最接近当前技术路线"],
-        goals=["找到高相关论文", "沉淀可追溯科研证据", "发现可验证研究空白"],
-        methods=methods,
-        materials=materials,
-        reagents=["高碘酸钠", "二胺"],
-        metrics=["力学性能", "界面结合", "热稳定性"],
-        mechanisms=["醛基-胺基反应", "界面交联"],
-        applications=["热压材料", "可持续复合材料"],
-        keywords_zh=["脱木质素竹材", "高碘酸钠氧化", "二胺改性", "热压"],
-        keywords_en=[
-            "delignified bamboo",
-            "sodium periodate oxidation",
-            "diamine modification",
-            "hot pressing",
-        ],
-        synonyms=["periodate oxidation", "aldehyde cellulose", "biomass composite"],
-        exclusions=["无化学改性的竹材应用", "纯木塑复合材料"],
-        confidence=0.82 if is_bamboo else 0.68,
+        source_type=source_type,  # type: ignore[arg-type]
+        discipline=source_payload.get("discipline") or project.discipline,
+        subfield=source_payload.get("subfield"),
+        research_object=source_payload.get("research_object") or [],
+        research_questions=source_payload.get("research_questions") or [],
+        goals=source_payload.get("goals") or [],
+        methods=source_payload.get("methods") or [],
+        materials=source_payload.get("materials") or [],
+        reagents=source_payload.get("reagents") or [],
+        metrics=source_payload.get("metrics") or [],
+        mechanisms=source_payload.get("mechanisms") or [],
+        applications=source_payload.get("applications") or [],
+        keywords_zh=source_payload.get("keywords_zh") or [],
+        keywords_en=source_payload.get("keywords_en") or [],
+        synonyms=source_payload.get("synonyms") or [],
+        exclusions=source_payload.get("exclusions") or [],
+        confidence=float(source_payload.get("confidence") or 0.72),
     )
 
 
+def rough_token_count(text: str) -> int:
+    return max(1, len(text) // 2)
+
+
 @app.post("/api/v1/projects/{project_id}/profile:generate")
-def generate_profile(
+async def generate_profile(
     project_id: str,
     payload: ProfileGenerateRequest,
     request: Request,
+    settings: Settings = Depends(get_settings),
     user: User = Depends(current_user),
 ):
     project = get_project_for_user(project_id, user)
-    profile = build_profile(project, payload)
+    try:
+        source_payload = await AiProvider(settings).generate_profile_payload(
+            project=project,
+            one_sentence=payload.one_sentence,
+        )
+        profile = profile_from_payload(project, source_payload, "one_sentence")
+    except AiProviderConfigError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "AI_PROVIDER_CONFIG_MISSING",
+                "message": "AI provider is not configured.",
+                "details": {"reason": str(exc)},
+            },
+        ) from exc
+    except (AiOutputValidationError, ValueError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "AI_OUTPUT_SCHEMA_INVALID",
+                "message": "AI profile output did not match the required schema.",
+                "details": {},
+            },
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "AI_PROVIDER_REQUEST_FAILED",
+                "message": "AI provider request failed.",
+                "details": {},
+            },
+        ) from exc
     store.profiles[profile.id] = profile
     store.add_cost(
         user_id=user.id,
         project_id=project.id,
         feature="profile.generate",
         requirement_id="RR-MVP-003",
+        provider=settings.ai_provider,
+        model=settings.openai_model if settings.ai_provider == "openai" else "mock-research-radar",
         quota_delta=0,
+        estimated_cost=0.0 if settings.ai_provider == "mock" else 0.01,
+        input_tokens=rough_token_count(f"{project.name} {project.description or ''} {payload.one_sentence}"),
+        output_tokens=rough_token_count(str(source_payload)),
     )
     return envelope(request, profile)
 
@@ -423,6 +481,54 @@ def get_upload(upload_id: str, request: Request, user: User = Depends(current_us
     return envelope(request, upload)
 
 
+def unique_terms(*groups: list[str]) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for value in group:
+            term = value.strip()
+            marker = term.lower()
+            if not term or marker in seen:
+                continue
+            seen.add(marker)
+            terms.append(term)
+    return terms
+
+
+def query_from_terms(terms: list[str], fallback: str) -> str:
+    selected = terms[:4]
+    if not selected:
+        selected = [fallback]
+    return " AND ".join(f"({term})" for term in selected)
+
+
+def build_search_task_specs(profile: ResearchProfile) -> list[tuple[str, str]]:
+    exact_terms = unique_terms(
+        profile.keywords_en,
+        profile.research_object,
+        profile.methods,
+        profile.materials,
+    )
+    expanded_terms = unique_terms(
+        profile.synonyms,
+        profile.materials,
+        profile.metrics,
+        profile.applications,
+        profile.keywords_en,
+    )
+    method_terms = unique_terms(
+        profile.methods,
+        profile.mechanisms,
+        profile.metrics,
+        profile.materials,
+    )
+    return [
+        ("exact", query_from_terms(exact_terms, "research topic")),
+        ("expanded", query_from_terms(expanded_terms, "related research")),
+        ("method_transfer", query_from_terms(method_terms, "research method")),
+    ]
+
+
 @app.post("/api/v1/projects/{project_id}/search-tasks:generate")
 def generate_search_tasks(project_id: str, request: Request, user: User = Depends(current_user)):
     project = get_project_for_user(project_id, user)
@@ -432,13 +538,8 @@ def generate_search_tasks(project_id: str, request: Request, user: User = Depend
     if [item for item in store.search_tasks.values() if item.project_id == project.id]:
         tasks = [item for item in store.search_tasks.values() if item.project_id == project.id]
         return envelope(request, tasks)
-    task_specs = [
-        ("exact", "(delignified bamboo) AND (sodium periodate oxidation) AND (diamine)"),
-        ("expanded", "(cellulose OR lignocellulosic biomass) AND aldehyde AND crosslinking"),
-        ("method_transfer", "(periodate oxidation) AND (bio-based composite OR membrane)"),
-    ]
     tasks: list[SearchTask] = []
-    for task_type, query in task_specs:
+    for task_type, query in build_search_task_specs(profile):
         task = SearchTask(
             id=make_id("search"),
             project_id=project.id,
@@ -540,19 +641,14 @@ async def run_retrieval_adapter(
             elapsed_ms=int((monotonic() - started) * 1000),
         )
     except Exception as exc:
-        fallback = fallback_open_records(task, adapter.source)
         return RetrievalRunResult(
             source=adapter.source,
-            status="degraded" if fallback else "failed",
-            records=fallback,
+            status="failed",
+            records=[],
             elapsed_ms=int((monotonic() - started) * 1000),
             error_code=retrieval_error_code(exc),
             error_message=str(exc)[:300],
-            fallback_reason=(
-                f"{adapter.source} live retrieval failed; used local open metadata fallback."
-                if fallback
-                else None
-            ),
+            fallback_reason=None,
         )
 
 
@@ -627,6 +723,28 @@ def get_search_task(task_id: str, request: Request, user: User = Depends(current
         raise HTTPException(status_code=404, detail="Search task not found")
     get_project_for_user(task.project_id, user)
     return envelope(request, task)
+
+
+@app.get("/api/v1/tasks/{task_id}")
+def get_task_status(task_id: str, request: Request, user: User = Depends(current_user)):
+    search_task = store.search_tasks.get(task_id)
+    if search_task:
+        get_project_for_user(search_task.project_id, user)
+    status = store.tasks.get(task_id)
+    if status:
+        return envelope(request, status)
+    if search_task:
+        bridged_status = "waiting" if search_task.status == "paused" else search_task.status
+        return envelope(
+            request,
+            TaskStatus(
+                task_id=search_task.id,
+                type="search_task",
+                status=bridged_status,  # type: ignore[arg-type]
+                message="检索任务尚未运行。" if search_task.status == "pending" else None,
+            ),
+        )
+    raise HTTPException(status_code=404, detail="Task not found")
 
 
 @app.get("/api/v1/search-tasks/{task_id}/source-records")
@@ -804,13 +922,53 @@ async def create_analysis(
             },
         )
     store.tasks[task.task_id] = task
-    ai_result = await AiProvider(settings).analyze_paper(
-        paper=paper,
-        profile=profile,
-        analysis_type=payload.analysis_type,
-        input_scope=payload.input_scope,
-    )
-    claims = [AnalysisClaim.model_validate(item) for item in ai_result["claims"]]
+    try:
+        ai_result = await AiProvider(settings).analyze_paper(
+            paper=paper,
+            profile=profile,
+            analysis_type=payload.analysis_type,
+            input_scope=payload.input_scope,
+        )
+        claims = [AnalysisClaim.model_validate(item) for item in ai_result["claims"]]
+    except AiProviderConfigError as exc:
+        task.status = "failed"
+        task.error_code = "AI_PROVIDER_CONFIG_MISSING"
+        task.message = "AI provider is not configured."
+        store.tasks[task.task_id] = task
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "AI_PROVIDER_CONFIG_MISSING",
+                "message": task.message,
+                "details": {"task_id": task.task_id, "reason": str(exc)},
+            },
+        ) from exc
+    except (AiOutputValidationError, KeyError, ValidationError) as exc:
+        task.status = "failed"
+        task.error_code = "AI_OUTPUT_SCHEMA_INVALID"
+        task.message = "AI 输出结构无效，未写入正式分析结果。"
+        store.tasks[task.task_id] = task
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "AI_OUTPUT_SCHEMA_INVALID",
+                "message": task.message,
+                "details": {"task_id": task.task_id},
+            },
+        ) from exc
+    except httpx.HTTPError as exc:
+        task.status = "failed"
+        task.error_code = "AI_PROVIDER_REQUEST_FAILED"
+        task.message = "AI provider request failed."
+        store.tasks[task.task_id] = task
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "AI_PROVIDER_REQUEST_FAILED",
+                "message": task.message,
+                "details": {"task_id": task.task_id},
+            },
+        ) from exc
     safety = validate_analysis_safety(ai_result["result"], claims, paper)
     if safety["hallucinated_doi_count"] or safety["fact_inference_confusion_count"]:
         task.status = "failed"

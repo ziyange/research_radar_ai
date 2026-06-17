@@ -1,8 +1,9 @@
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -11,7 +12,9 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_host: str = "127.0.0.1"
     api_port: int = 8010
-    cors_origins: list[str] = Field(
+    demo_seed_enabled: bool = False
+    dev_user_id: str | None = None
+    cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
     )
 
@@ -46,6 +49,17 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @property
+    def ai_configured(self) -> bool:
+        if self.ai_provider == "mock":
+            return True
+        return bool(self.openai_api_key and self.openai_base_url and self.openai_model)
+
+    @property
+    def openai_base_url_host(self) -> str | None:
+        parsed = urlparse(self.openai_base_url)
+        return parsed.netloc or None
 
 
 @lru_cache

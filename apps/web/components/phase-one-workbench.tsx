@@ -39,6 +39,7 @@ import {
   EmailOutboxRecord,
   EmailPreference,
   FeedbackType,
+  HealthStatus,
   KnowledgeItem,
   Message,
   PaperAnalysis,
@@ -47,20 +48,18 @@ import {
   ResearchProfile,
   ResearchProject,
   SearchTask,
+  SourceRecord,
   TaskStatus,
   User,
   UserFeedback,
   api,
 } from "../lib/api";
 
-const defaultProject = {
-  name: "脱木质素竹材热压材料研究",
-  discipline: "材料科学",
-  description: "关注高碘酸钠氧化和二胺改性后的力学与界面性能。",
+const emptyProjectForm = {
+  name: "",
+  discipline: "",
+  description: "",
 };
-
-const defaultOneSentence =
-  "我研究脱木质素竹片经过高碘酸钠氧化和二胺改性后的热压材料性能。";
 
 const feedbackLabels: Record<FeedbackType, string> = {
   very_relevant: "高度相关",
@@ -88,7 +87,14 @@ const taskLabels: Record<SearchTask["task_type"], string> = {
   exploratory: "探索检索",
 };
 
-type ActiveModal = "project" | "profileWizard" | "profileEdit" | "report" | "quota" | null;
+type ActiveModal =
+  | "project"
+  | "profileWizard"
+  | "profileEdit"
+  | "report"
+  | "quota"
+  | "sources"
+  | null;
 
 type ToastState = {
   tone: "success" | "error" | "warning";
@@ -160,24 +166,35 @@ function profileState(profile: ResearchProfile | null) {
   return `v${profile.version} / ${profile.status} / 置信度 ${Math.round(profile.confidence * 100)}%`;
 }
 
+function sourceRecordTitle(record: SourceRecord) {
+  return record.normalized_payload?.title ?? record.source_identifier;
+}
+
+function sourceRecordDoi(record: SourceRecord) {
+  return record.normalized_payload?.doi ?? "无 DOI";
+}
+
 export function PhaseOneWorkbench() {
   const [user, setUser] = useState<User | null>(null);
   const [quota, setQuota] = useState<{ quota_balance: number; plan: User["plan"] } | null>(null);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
   const [projects, setProjects] = useState<ResearchProject[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [profile, setProfile] = useState<ResearchProfile | null>(null);
-  const [oneSentence, setOneSentence] = useState(defaultOneSentence);
+  const [oneSentence, setOneSentence] = useState("");
   const [diagnosis, setDiagnosis] = useState<Awaited<ReturnType<typeof api.diagnosis>> | null>(
     null
   );
   const [searchTasks, setSearchTasks] = useState<SearchTask[]>([]);
   const [taskRuns, setTaskRuns] = useState<TaskStatus[]>([]);
+  const [sourceRecords, setSourceRecords] = useState<Record<string, SourceRecord[]>>({});
+  const [selectedSourceTaskId, setSelectedSourceTaskId] = useState<string | null>(null);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [selectedRecommendationId, setSelectedRecommendationId] = useState<string | null>(null);
   const [feedbackItems, setFeedbackItems] = useState<UserFeedback[]>([]);
   const [analysis, setAnalysis] = useState<PaperAnalysis | null>(null);
   const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeItem[]>([]);
-  const [knowledgeQuery, setKnowledgeQuery] = useState("热压");
+  const [knowledgeQuery, setKnowledgeQuery] = useState("");
   const [reports, setReports] = useState<RadarReport[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [emailPreference, setEmailPreference] = useState<EmailPreference | null>(null);
@@ -187,7 +204,7 @@ export function PhaseOneWorkbench() {
   const [workbenchOpen, setWorkbenchOpen] = useState(true);
   const [busy, setBusy] = useState<Partial<Record<BusyKey, boolean>>>({ initial: true });
 
-  const [projectForm, setProjectForm] = useState(defaultProject);
+  const [projectForm, setProjectForm] = useState(emptyProjectForm);
   const [profileDraft, setProfileDraft] = useState({
     research_object: "",
     methods: "",
@@ -210,6 +227,13 @@ export function PhaseOneWorkbench() {
       null,
     [recommendations, selectedRecommendationId]
   );
+
+  const selectedSourceTask = useMemo(
+    () => searchTasks.find((task) => task.id === selectedSourceTaskId) ?? searchTasks[0] ?? null,
+    [searchTasks, selectedSourceTaskId]
+  );
+
+  const selectedSourceRecords = selectedSourceTask ? sourceRecords[selectedSourceTask.id] ?? [] : [];
 
   const visibleRecommendations = useMemo(() => {
     const query = knowledgeQuery.trim().toLowerCase();
@@ -273,6 +297,8 @@ export function PhaseOneWorkbench() {
     setDiagnosis(null);
     setSearchTasks([]);
     setTaskRuns([]);
+    setSourceRecords({});
+    setSelectedSourceTaskId(null);
     setRecommendations([]);
     setSelectedRecommendationId(null);
     setFeedbackItems([]);
@@ -281,48 +307,74 @@ export function PhaseOneWorkbench() {
     setReports([]);
   }, []);
 
-  const loadProjectContext = useCallback(async (project: ResearchProject) => {
-    resetProjectContext();
-    if (!project.current_profile_id) {
-      return;
-    }
-    try {
-      const currentProfile = await api.profile(project.id);
-      setProfile(currentProfile);
-      if (currentProfile.status !== "confirmed") {
+  const loadRetrievalArtifacts = useCallback(
+    async (projectId: string, knownTasks?: SearchTask[], knownRuns?: TaskStatus[]) => {
+      const tasks = knownTasks ?? (await api.searchTasks(projectId));
+      const taskStatuses =
+        knownRuns ??
+        (await Promise.all(tasks.map((task) => api.taskStatus(task.id).catch(() => null))));
+      const sourceEntries = await Promise.all(
+        tasks.map(
+          async (task) => [task.id, await api.sourceRecords(task.id).catch(() => [])] as const
+        )
+      );
+      setSearchTasks(tasks);
+      setTaskRuns(taskStatuses.filter((status): status is TaskStatus => Boolean(status)));
+      setSourceRecords(Object.fromEntries(sourceEntries));
+      setSelectedSourceTaskId((current) => current ?? tasks[0]?.id ?? null);
+    },
+    []
+  );
+
+  const loadProjectContext = useCallback(
+    async (project: ResearchProject) => {
+      resetProjectContext();
+      if (!project.current_profile_id) {
         return;
       }
-      const [nextDiagnosis, recList, savedFeedback, savedKnowledge, reportList, outbox] =
-        await Promise.all([
-          api.diagnosis(project.id),
-          api.recommendations(project.id),
-          api.projectFeedback(project.id),
-          api.searchKnowledge(project.id, "热压"),
-          api.reports(project.id),
-          api.emailOutbox(),
-        ]);
-      setDiagnosis(nextDiagnosis);
-      setRecommendations(recList.items);
-      setSelectedRecommendationId(recList.items[0]?.id ?? null);
-      setFeedbackItems(savedFeedback);
-      setKnowledgeItems(savedKnowledge);
-      setReports(reportList);
-      setEmailOutbox(outbox);
-    } catch {
-      showAppToast("warning", "项目上下文加载失败，可重新生成画像。");
-    }
-  }, [resetProjectContext, showAppToast]);
+      try {
+        const currentProfile = await api.profile(project.id);
+        setProfile(currentProfile);
+        if (currentProfile.status !== "confirmed") {
+          return;
+        }
+        const [nextDiagnosis, recList, savedFeedback, savedKnowledge, reportList, outbox] =
+          await Promise.all([
+            api.diagnosis(project.id),
+            api.recommendations(project.id),
+            api.projectFeedback(project.id),
+            api.searchKnowledge(project.id, ""),
+            api.reports(project.id),
+            api.emailOutbox(),
+            loadRetrievalArtifacts(project.id),
+          ]);
+        setDiagnosis(nextDiagnosis);
+        setRecommendations(recList.items);
+        setSelectedRecommendationId(recList.items[0]?.id ?? null);
+        setFeedbackItems(savedFeedback);
+        setKnowledgeItems(savedKnowledge);
+        setReports(reportList);
+        setEmailOutbox(outbox);
+      } catch {
+        showAppToast("warning", "项目上下文加载失败，可重新生成画像。");
+      }
+    },
+    [loadRetrievalArtifacts, resetProjectContext, showAppToast]
+  );
 
   const loadInitial = useCallback(async () => {
     await runAction("initial", async () => {
-      const [me, quotaData, projectList, messageList, preference, outbox] = await Promise.all([
-        api.me(),
-        api.quota(),
-        api.projects(),
-        api.messages(),
-        api.emailPreference(),
-        api.emailOutbox(),
-      ]);
+      const [serviceHealth, me, quotaData, projectList, messageList, preference, outbox] =
+        await Promise.all([
+          api.health(),
+          api.me(),
+          api.quota(),
+          api.projects(),
+          api.messages(),
+          api.emailPreference(),
+          api.emailOutbox(),
+        ]);
+      setHealth(serviceHealth);
       setUser(me);
       setQuota(quotaData);
       setProjects(projectList);
@@ -359,11 +411,16 @@ export function PhaseOneWorkbench() {
   async function handleCreateProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await runAction("project", async () => {
-      const project = await api.createProject(projectForm);
+      const project = await api.createProject({
+        name: projectForm.name.trim(),
+        discipline: projectForm.discipline.trim() || undefined,
+        description: projectForm.description.trim() || undefined,
+      });
       setProjects((current) => [project, ...current]);
       setActiveProjectId(project.id);
       resetProjectContext();
-      setProjectForm(defaultProject);
+      setProjectForm(emptyProjectForm);
+      setOneSentence("");
       showAppToast("success", "项目已创建，请生成研究画像。");
       setModal("profileWizard");
     });
@@ -376,7 +433,7 @@ export function PhaseOneWorkbench() {
       return;
     }
     await runAction("profile", async () => {
-      const nextProfile = await api.generateProfile(activeProject.id, oneSentence);
+      const nextProfile = await api.generateProfile(activeProject.id, oneSentence.trim());
       setProfile(nextProfile);
       setDiagnosis(null);
       showAppToast("success", "画像草稿已生成。");
@@ -443,8 +500,7 @@ export function PhaseOneWorkbench() {
       const runResults = await Promise.all(tasks.map((task) => api.runSearchTask(task.id)));
       const recList = await api.recommendations(activeProject.id);
       const savedFeedback = await api.projectFeedback(activeProject.id);
-      setSearchTasks(tasks);
-      setTaskRuns(runResults);
+      await loadRetrievalArtifacts(activeProject.id, tasks, runResults);
       setRecommendations(recList.items);
       setSelectedRecommendationId(recList.items[0]?.id ?? null);
       setFeedbackItems(savedFeedback);
@@ -512,9 +568,10 @@ export function PhaseOneWorkbench() {
         paper_id: selectedRecommendation.paper.id,
         status,
         tags: ["方法参考", channelLabels[selectedRecommendation.channel]],
-        note: "从 Phase 1 推荐闭环加入，后续比较热压参数和界面性能。",
+        note: "从 Phase 1 推荐闭环加入，后续可补充研读笔记和实验关联。",
       });
-      const search = await api.searchKnowledge(activeProject.id, knowledgeQuery || "热压");
+      const query = knowledgeQuery.trim();
+      const search = query ? await api.searchKnowledge(activeProject.id, query) : [];
       setKnowledgeItems(search.length > 0 ? search : [item]);
       showAppToast("success", "论文已加入知识库。");
     });
@@ -697,7 +754,7 @@ export function PhaseOneWorkbench() {
             </button>
           </div>
           <div className="user-pill">
-            <div className="avatar">{user?.display_name.slice(0, 1) ?? "研"}</div>
+            <div className="avatar">{user?.display_name?.slice(0, 1) ?? "研"}</div>
             <div>
               <strong>{user?.display_name ?? "加载中"}</strong>
               <div className="brand-subtitle">{user?.plan ?? "free"} plan</div>
@@ -837,6 +894,69 @@ export function PhaseOneWorkbench() {
                 </button>
               </div>
               {profile ? <ProfileSummary profile={profile} /> : <EmptyState text="点击上方按钮生成画像。" />}
+            </section>
+
+            <section className="panel mini-panel source-panel">
+              <div className="panel-header compact">
+                <div>
+                  <p className="eyebrow">E2E-002 / SourceRecord</p>
+                  <h2 className="panel-title">检索数据源</h2>
+                </div>
+                <span className="source-provider">
+                  {health?.retrieval_provider === "live" ? "OpenAlex/Crossref" : "mock"}
+                </span>
+              </div>
+              <div className="source-body">
+                <div className="source-meta">
+                  <span>AI：{health?.ai?.provider ?? health?.ai_provider ?? "-"}</span>
+                  <span>{health?.ai?.configured ? "AI 已配置" : "AI 未配置"}</span>
+                  <span>{health?.demo_seed_enabled ? "dev seed 开启" : "dev seed 关闭"}</span>
+                </div>
+                {searchTasks.length === 0 ? (
+                  <EmptyState text="确认画像并生成检索后显示来源状态。" />
+                ) : (
+                  <div className="source-list">
+                    {searchTasks.map((task) => {
+                      const status = taskRuns.find((run) => run.task_id === task.id);
+                      const records = sourceRecords[task.id] ?? [];
+                      const sourceStatuses = status?.source_statuses ?? [];
+                      return (
+                        <button
+                          className="source-row"
+                          key={task.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedSourceTaskId(task.id);
+                            setModal("sources");
+                          }}
+                        >
+                          <div className="source-row-main">
+                            <b>{taskLabels[task.task_type]}</b>
+                            <span>{task.query_text}</span>
+                          </div>
+                          <strong>{records.length} 条</strong>
+                          <div className="source-status-grid">
+                            {sourceStatuses.length ? (
+                              sourceStatuses.map((sourceStatus) => (
+                                <span
+                                  className={`source-pill ${sourceStatus.status}`}
+                                  key={`${task.id}-${sourceStatus.source}`}
+                                  title={sourceStatus.error_message ?? undefined}
+                                >
+                                  {sourceStatus.source}: {sourceStatus.status}
+                                  {sourceStatus.record_count ? ` / ${sourceStatus.record_count}` : ""}
+                                </span>
+                              ))
+                            ) : (
+                              <span className="source-pill pending">等待运行</span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </section>
 
             <section className="panel action-panel">
@@ -1003,6 +1123,7 @@ export function PhaseOneWorkbench() {
                 onChange={(event) =>
                   setProjectForm((current) => ({ ...current, name: event.target.value }))
                 }
+                placeholder="例如：高性能生物质热压材料研究"
                 required
               />
             </label>
@@ -1013,6 +1134,7 @@ export function PhaseOneWorkbench() {
                 onChange={(event) =>
                   setProjectForm((current) => ({ ...current, discipline: event.target.value }))
                 }
+                placeholder="例如：材料科学"
               />
             </label>
             <label>
@@ -1022,6 +1144,7 @@ export function PhaseOneWorkbench() {
                 onChange={(event) =>
                   setProjectForm((current) => ({ ...current, description: event.target.value }))
                 }
+                placeholder="简要描述研究对象、方法、指标或阶段目标"
                 rows={3}
               />
             </label>
@@ -1029,7 +1152,11 @@ export function PhaseOneWorkbench() {
               <button className="ghost-button" type="button" onClick={() => setModal(null)}>
                 取消
               </button>
-              <button className="primary-button" type="submit" disabled={busy.project}>
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={busy.project || !projectForm.name.trim()}
+              >
                 {busy.project ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
                 创建项目
               </button>
@@ -1052,6 +1179,7 @@ export function PhaseOneWorkbench() {
               <textarea
                 value={oneSentence}
                 onChange={(event) => setOneSentence(event.target.value)}
+                placeholder="例如：我研究某类材料在某种处理方法后的性能、机制或应用。"
                 rows={5}
               />
             </label>
@@ -1059,7 +1187,11 @@ export function PhaseOneWorkbench() {
               <button className="ghost-button" type="button" onClick={() => setModal(null)}>
                 稍后再说
               </button>
-              <button className="primary-button" type="submit" disabled={!activeProject || busy.profile}>
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={!activeProject || busy.profile || !oneSentence.trim()}
+              >
                 {busy.profile ? <Loader2 className="spin" size={16} /> : <WandSparkles size={16} />}
                 生成画像草稿
               </button>
@@ -1152,6 +1284,50 @@ export function PhaseOneWorkbench() {
             </div>
           ) : (
             <EmptyState text="暂无报告，请先生成日报。" />
+          )}
+        </Modal>
+      ) : null}
+
+      {modal === "sources" ? (
+        <Modal title="检索来源记录" onClose={() => setModal(null)}>
+          {selectedSourceTask ? (
+            <div className="source-detail">
+              <div className="source-detail-head">
+                <div>
+                  <p className="eyebrow">{taskLabels[selectedSourceTask.task_type]}</p>
+                  <h3>{selectedSourceTask.query_text}</h3>
+                </div>
+                <span className="source-provider">
+                  {health?.retrieval_provider === "live" ? "live" : "mock"}
+                </span>
+              </div>
+              {selectedSourceRecords.length === 0 ? (
+                <EmptyState text="该任务暂无 SourceRecord 入库记录。" />
+              ) : (
+                <div className="source-record-list">
+                  {selectedSourceRecords.map((record) => (
+                    <article className="source-record" key={record.id}>
+                      <div>
+                        <b>{sourceRecordTitle(record)}</b>
+                        <span>
+                          {record.source} · {record.normalized_payload?.year ?? "年份未知"} ·{" "}
+                          {sourceRecordDoi(record)}
+                        </span>
+                      </div>
+                      <div className="source-record-meta">
+                        <span>quality {Math.round(record.quality_score * 100)}%</span>
+                        <span>{record.paper_id ? `paper ${record.paper_id}` : "未关联 Paper"}</span>
+                        <span>
+                          {record.normalized_payload?.open_access ? "open access" : "fulltext unknown"}
+                        </span>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <EmptyState text="暂无检索任务。" />
           )}
         </Modal>
       ) : null}
