@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date
 from typing import Any, Literal, cast
@@ -1055,105 +1056,126 @@ class StandaloneResearchScanAgent:
         candidates: list[AgentCandidate],
         trace: list[AgentTraceStep],
     ) -> list[AgentCandidateAnalysis]:
-        analyses: list[AgentCandidateAnalysis] = []
         new_candidates = [candidate for candidate in candidates if candidate.duplicate_status == "new"]
         targets = new_candidates[: payload.analyze_top_n]
-        for candidate in targets:
-            paper = Paper(
-                id=f"agent_{candidate.id}",
-                title=candidate.title,
-                title_zh=candidate.title_zh,
-                year=candidate.year or date.today().year,
-                journal=candidate.venue or candidate.source,
-                doi=candidate.doi,
-                authors=candidate.authors,
-                abstract=candidate.abstract,
-                keywords=candidate.keywords,
-                fulltext_status="open_access"
-                if candidate.open_access or candidate.fulltext_url
-                else "unknown",
-                source_count=1,
+        if not targets:
+            trace.append(
+                AgentTraceStep(
+                    step="ai_analysis",
+                    status="succeeded",
+                    summary="没有非重复候选需要执行 AI 分析。",
+                    input_count=0,
+                    output_count=0,
+                )
             )
-            try:
-                ai_result = await AiProvider(self.settings).analyze_paper(
-                    paper=paper,
-                    profile=profile,
-                    analysis_type=payload.analysis_type,
-                    input_scope=payload.input_scope,
-                )
-                claims = [AnalysisClaim.model_validate(item) for item in ai_result["claims"]]
-            except AiProviderConfigError as exc:
-                trace.append(
-                    AgentTraceStep(
-                        step="ai_analysis",
-                        status="failed",
-                        summary=f"AI provider 配置缺失：{exc}",
-                    )
-                )
-                break
-            except (AiOutputValidationError, KeyError, ValueError, httpx.HTTPError) as exc:
-                trace.append(
-                    AgentTraceStep(
-                        step="ai_analysis",
-                        status="failed",
-                        summary=f"候选 {candidate.id} 的 AI 输出无效或请求失败：{exc}",
-                        input_count=1,
-                    )
-                )
-                continue
+            return []
 
-            safety = validate_analysis_safety(ai_result["result"], claims, paper)
-            if safety["hallucinated_doi_count"] or safety["fact_inference_confusion_count"]:
-                trace.append(
-                    AgentTraceStep(
-                        step="ai_safety",
-                        status="failed",
-                        summary=f"候选 {candidate.id} 未通过 AI 安全校验。",
-                        input_count=1,
-                        output_count=0,
-                    )
-                )
-                continue
-            cost = self.store.add_cost(
-                user_id=user.id,
-                project_id=payload.project_id,
-                paper_id=paper.id,
-                feature=f"agent.research_scan.{payload.analysis_type}",
-                requirement_id="RR-FUTURE-010",
-                provider=self.settings.ai_provider,
-                model=ai_result["model"],
-                quota_delta=0,
-                estimated_cost=0.0 if self.settings.ai_provider == "mock" else 0.01,
-                task_id=None,
-                input_tokens=max(1, len(_compact_text(paper.title, paper.abstract)) // 4),
-                output_tokens=max(1, sum(len(claim.claim) for claim in claims) // 2),
-            )
-            analyses.append(
-                AgentCandidateAnalysis(
-                    candidate_id=candidate.id,
-                    paper_id=paper.id,
-                    paper=self._paper_snapshot_from_candidate(candidate, paper),
-                    analysis_type=payload.analysis_type,
-                    input_scope=payload.input_scope,
-                    result=ai_result["result"],
-                    claims=claims,
-                    evidence_labels_valid=not safety["missing_fact_levels"],
-                    traceability_score=0.86,
-                    model=ai_result["model"],
-                    cost_record_id=cost.id,
-                )
-            )
+        concurrency = max(1, min(self.settings.agent_ai_analysis_concurrency, len(targets)))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def run_one(candidate: AgentCandidate) -> tuple[AgentCandidateAnalysis | None, AgentTraceStep | None]:
+            async with semaphore:
+                return await self._analyze_one_candidate(payload, user, profile, candidate)
+
+        results = await asyncio.gather(*(run_one(candidate) for candidate in targets))
+        analyses = [analysis for analysis, _ in results if analysis is not None]
+        trace.extend(step for _, step in results if step is not None)
         trace.append(
             AgentTraceStep(
                 step="ai_analysis",
                 status="succeeded",
-                summary="仅对非重复候选执行 AI 分析，并记录成本。",
+                summary=(
+                    f"并发执行非重复候选 AI 分析，最大并发 {concurrency}；"
+                    "单篇失败不阻断其他候选。"
+                ),
                 input_count=len(targets),
                 output_count=len(analyses),
                 evidence_refs=[analysis.candidate_id for analysis in analyses],
             )
         )
         return analyses
+
+    async def _analyze_one_candidate(
+        self,
+        payload: AgentScanRequest,
+        user: User,
+        profile: ResearchProfile | None,
+        candidate: AgentCandidate,
+    ) -> tuple[AgentCandidateAnalysis | None, AgentTraceStep | None]:
+        paper = Paper(
+            id=f"agent_{candidate.id}",
+            title=candidate.title,
+            title_zh=candidate.title_zh,
+            year=candidate.year or date.today().year,
+            journal=candidate.venue or candidate.source,
+            doi=candidate.doi,
+            authors=candidate.authors,
+            abstract=candidate.abstract,
+            keywords=candidate.keywords,
+            fulltext_status="open_access"
+            if candidate.open_access or candidate.fulltext_url
+            else "unknown",
+            source_count=1,
+        )
+        try:
+            ai_result = await AiProvider(self.settings).analyze_paper(
+                paper=paper,
+                profile=profile,
+                analysis_type=payload.analysis_type,
+                input_scope=payload.input_scope,
+            )
+            claims = [AnalysisClaim.model_validate(item) for item in ai_result["claims"]]
+        except AiProviderConfigError as exc:
+            return None, AgentTraceStep(
+                step="ai_analysis",
+                status="failed",
+                summary=f"AI provider 配置缺失：{exc}",
+                input_count=1,
+            )
+        except (AiOutputValidationError, KeyError, ValueError, httpx.HTTPError) as exc:
+            return None, AgentTraceStep(
+                step="ai_analysis",
+                status="failed",
+                summary=f"候选 {candidate.id} 的 AI 输出无效或请求失败：{exc}",
+                input_count=1,
+            )
+
+        safety = validate_analysis_safety(ai_result["result"], claims, paper)
+        if safety["hallucinated_doi_count"] or safety["fact_inference_confusion_count"]:
+            return None, AgentTraceStep(
+                step="ai_safety",
+                status="failed",
+                summary=f"候选 {candidate.id} 未通过 AI 安全校验。",
+                input_count=1,
+                output_count=0,
+            )
+        cost = self.store.add_cost(
+            user_id=user.id,
+            project_id=payload.project_id,
+            paper_id=paper.id,
+            feature=f"agent.research_scan.{payload.analysis_type}",
+            requirement_id="RR-FUTURE-010",
+            provider=self.settings.ai_provider,
+            model=ai_result["model"],
+            quota_delta=0,
+            estimated_cost=0.0 if self.settings.ai_provider == "mock" else 0.01,
+            task_id=None,
+            input_tokens=max(1, len(_compact_text(paper.title, paper.abstract)) // 4),
+            output_tokens=max(1, sum(len(claim.claim) for claim in claims) // 2),
+        )
+        return AgentCandidateAnalysis(
+            candidate_id=candidate.id,
+            paper_id=paper.id,
+            paper=self._paper_snapshot_from_candidate(candidate, paper),
+            analysis_type=payload.analysis_type,
+            input_scope=payload.input_scope,
+            result=ai_result["result"],
+            claims=claims,
+            evidence_labels_valid=not safety["missing_fact_levels"],
+            traceability_score=0.86,
+            model=ai_result["model"],
+            cost_record_id=cost.id,
+        ), None
 
     async def _build_report(
         self,

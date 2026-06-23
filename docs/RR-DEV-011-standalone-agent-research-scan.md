@@ -61,6 +61,7 @@ flowchart LR
 - 对外暴露 `compliance_notes`：说明来源模式和合规限制。
 - AI 负责查询扩展和逐篇文献结构化分析；篇数、循环、过滤、去重、汇总索引由后端程序控制。
 - 所有逐篇 AI 分析必须走结构化 schema、事实分级和安全校验。
+- 逐篇 AI 分析使用受控并发，默认 `AGENT_AI_ANALYSIS_CONCURRENCY=2`；单篇失败不阻断其他候选。
 - 来源抓取、过滤、去重、成本记录由确定性系统完成。
 
 ## 4. HITL 设计
@@ -307,7 +308,7 @@ CNKI 真实接入前置条件：
 | CNKI 合规适配 | `agent_scan.py` | `official_api` 调用授权 API；`authorized_export` 接受用户导入；未授权 public metadata 跳过。 |
 | 筛选 | `agent_scan.py` | 按 `published_after`、`published_before`、`min_score`、`limit`。 |
 | 去重 | `agent_scan.py` | DOI 和标准化标题，对比当前知识库与 Paper 库。 |
-| AI 分析 | `agent_scan.py`、`ai.py` | 对每篇非重复候选逐篇调用 `AiProvider.analyze_paper()`，复用 mock/openai-compatible。 |
+| AI 分析 | `agent_scan.py`、`ai.py` | 对非重复候选并发调用 `AiProvider.analyze_paper()`，最大并发由 `AGENT_AI_ANALYSIS_CONCURRENCY` 控制。 |
 | 报告索引 | `agent_scan.py` | 后端确定性生成 `AgentScanReport`，不额外调用 AI。 |
 | 成本与审计 | `agent_scan.py`、`store.py` | 写入 `CostRecord`，feature 为 `agent.research_scan.{analysis_type}`。 |
 | API 路由 | `services/api/src/research_radar_api/main.py` | `POST /api/v1/agent/research-scan:run`。 |
@@ -408,7 +409,7 @@ AI 分析必须：
 
 当请求 `limit = 5`、`analyze_top_n = 5` 且官方 API 返回 5 条满足条件的候选：
 
-- 后端必须通过 for-loop 对 5 篇分别调用逐篇 AI 分析。
+- 后端必须对 5 篇分别执行逐篇 AI 分析；执行方式为受控并发，不允许让 AI 决定篇数。
 - 不允许让 AI 决定分析几篇。
 - 不允许让 AI 生成候选数量、研究方向或流程控制字段。
 - `report.model = deterministic-agent-scan-report`，证明报告索引由后端确定性生成。
@@ -444,6 +445,7 @@ $env:RUN_LIVE_RETRIEVAL_TESTS='1'; .\.venv\Scripts\python.exe -m pytest services
 - `.\.venv\Scripts\python.exe -m pytest`：26 passed, 3 skipped。
 - `ruff`：All checks passed。
 - live OpenAlex/Crossref retrieval smoke：1 passed。
+- live Agent 5 篇并发 smoke：HTTP 200；OpenAlex 成功返回候选，Crossref 本次 ReadTimeout；5 篇候选中 3 篇由 `qwen3.6-plus` 完成增强分析，2 篇因 provider 连接断开写入 trace，不阻断整体响应。该结果证明并发链路可运行，同时说明真实供应商侧需要保守并发，默认并发已设为 2。
 
 未在 Codex 内完成：
 

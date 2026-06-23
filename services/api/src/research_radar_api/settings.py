@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_api_key: str | None = None
     ai_request_timeout_seconds: float = 90.0
+    agent_ai_analysis_concurrency: int = 2
     agent_source_timeout_seconds: float = 20.0
     x_mol_api_base_url: str | None = None
     x_mol_api_key: str | None = None

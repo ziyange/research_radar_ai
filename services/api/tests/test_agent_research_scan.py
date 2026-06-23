@@ -1,4 +1,5 @@
 import os
+from time import monotonic
 
 import pytest
 from fastapi.testclient import TestClient
@@ -165,6 +166,54 @@ def test_agent_scan_openalex_crossref_analyzes_five_records_and_builds_system_re
     costs = unwrap(client.get("/api/v1/me/costs"))
     assert any(item["feature"] == "agent.research_scan.quick" for item in costs)
     assert any(item["feature"] == "agent.research_scan.report_index" for item in costs)
+
+
+def test_agent_scan_ai_analysis_runs_with_bounded_concurrency(monkeypatch):
+    project = prepare_project()
+
+    async def fake_openalex_search(self, query, filters, limit):
+        return open_metadata_records("openalex")
+
+    async def slow_analysis(self, paper, profile, analysis_type, input_scope):
+        import asyncio
+
+        await asyncio.sleep(0.05)
+        return self._mock_analysis(paper, profile, analysis_type, input_scope)
+
+    monkeypatch.setattr(
+        "research_radar_api.agent_scan.OpenAlexAdapter.search",
+        fake_openalex_search,
+    )
+    monkeypatch.setattr(
+        "research_radar_api.agent_scan.AiProvider.analyze_paper",
+        slow_analysis,
+    )
+    monkeypatch.setenv("AGENT_AI_ANALYSIS_CONCURRENCY", "3")
+    get_settings.cache_clear()
+
+    started = monotonic()
+    result = unwrap(
+        client.post(
+            "/api/v1/agent/research-scan:run",
+            json={
+                "research_direction": "nanomaterials plant stress response",
+                "project_id": project["id"],
+                "sources": ["openalex"],
+                "source_modes": {"openalex": "live_api"},
+                "min_score": 0,
+                "limit": 5,
+                "analyze_top_n": 5,
+                "analysis_type": "quick",
+                "input_scope": "abstract",
+            },
+        )
+    )
+    elapsed = monotonic() - started
+
+    assert len(result["analyses"]) == 5
+    assert elapsed < 0.22
+    assert any("最大并发 3" in step["summary"] for step in result["trace"])
+    get_settings.cache_clear()
 
 
 def test_agent_scan_authorized_export_dedupes_against_knowledge():

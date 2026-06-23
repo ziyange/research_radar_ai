@@ -49,6 +49,7 @@ OPENAI_BASE_URL=https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mo
 OPENAI_MODEL=qwen3.6-plus
 OPENAI_API_KEY=你的百炼 API Key
 AI_REQUEST_TIMEOUT_SECONDS=90
+AGENT_AI_ANALYSIS_CONCURRENCY=2
 ```
 
 `AI_PROVIDER=openai` 时如果缺少 key、base URL 或 model，接口会返回 `AI_PROVIDER_CONFIG_MISSING`，不会静默回退 mock。
