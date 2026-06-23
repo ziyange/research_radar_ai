@@ -17,6 +17,7 @@ from .ai import (
     AiProviderConfigError,
     validate_analysis_safety,
 )
+from .agent_scan import AgentScanRequest, StandaloneResearchScanAgent
 from .db import database_health
 from .notifications import publish_report_notifications
 from .retrieval import (
@@ -156,6 +157,49 @@ def health(request: Request, settings: Settings = Depends(get_settings)):
             "time": datetime.now(timezone.utc).isoformat(),
         },
     )
+
+
+@app.post("/api/v1/agent/research-scan:run")
+async def run_agent_research_scan(
+    payload: AgentScanRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    user: User = Depends(current_user),
+):
+    if payload.project_id:
+        get_project_for_user(payload.project_id, user)
+    if (
+        (
+            payload.query_expansion == "ai"
+            or (payload.hitl_mode == "auto_analyze" and payload.analyze_top_n > 0)
+        )
+        and settings.ai_provider == "openai"
+        and not settings.ai_configured
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "AI_PROVIDER_CONFIG_MISSING",
+                "message": "AI_PROVIDER=openai 时必须配置 OPENAI_API_KEY、OPENAI_BASE_URL 和 OPENAI_MODEL。",
+            },
+        )
+    try:
+        result = await StandaloneResearchScanAgent(store, settings).run(payload, user)
+    except AiOutputValidationError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "AI_RETRIEVAL_PLAN_INVALID",
+                "message": f"AI 检索规划输出无效：{exc}",
+            },
+        ) from exc
+    store.audit(
+        "agent.research_scan",
+        "RR-FUTURE-010",
+        user_id=user.id,
+        project_id=payload.project_id,
+    )
+    return envelope(request, result)
 
 
 @app.post("/api/v1/auth/register")
@@ -1085,6 +1129,15 @@ def patch_knowledge(
     return envelope(request, item)
 
 
+@app.get("/api/v1/knowledge/{item_id}")
+def get_knowledge_item(item_id: str, request: Request, user: User = Depends(current_user)):
+    item = store.knowledge.get(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Knowledge item not found")
+    get_project_for_user(item.project_id, user)
+    return envelope(request, item)
+
+
 @app.get("/api/v1/projects/{project_id}/knowledge:search")
 def search_knowledge(
     project_id: str,
@@ -1148,6 +1201,14 @@ def generate_report(
 @app.get("/api/v1/messages")
 def list_messages(request: Request, user: User = Depends(current_user)):
     return envelope(request, [item for item in store.messages.values() if item.user_id == user.id])
+
+
+@app.get("/api/v1/messages/{message_id}")
+def get_message(message_id: str, request: Request, user: User = Depends(current_user)):
+    message = store.messages.get(message_id)
+    if not message or message.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return envelope(request, message)
 
 
 @app.post("/api/v1/messages/{message_id}:read")
@@ -1221,16 +1282,11 @@ def admin_audit_logs(request: Request, user: User = Depends(current_user)):
     return envelope(request, list(store.audit_logs.values()))
 
 
-@app.get("/api/v1/tasks/{task_id}")
-def get_task(task_id: str, request: Request):
-    task = store.tasks.get(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return envelope(request, task)
-
-
 @app.post("/api/v1/tasks/{task_id}:retry")
 def retry_task(task_id: str, request: Request, user: User = Depends(current_user)):
+    search_task = store.search_tasks.get(task_id)
+    if search_task:
+        get_project_for_user(search_task.project_id, user)
     task = store.tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")

@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
     openai_api_key: str | None = None
+    agent_source_timeout_seconds: float = 20.0
+    x_mol_api_base_url: str | None = None
+    x_mol_api_key: str | None = None
+    cnki_api_base_url: str | None = None
+    cnki_api_key: str | None = None
 
     email_provider: Literal["mock", "smtp", "api"] = "mock"
     email_from: str = "Research Radar AI <no-reply@research-radar.local>"

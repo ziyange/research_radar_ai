@@ -38,6 +38,8 @@ uv sync --dev
 - `AI_PROVIDER`
 - `DEMO_SEED_ENABLED`
 - `DEV_USER_ID`
+- `X_MOL_API_BASE_URL`
+- `CNKI_API_BASE_URL`
 
 默认 `AI_PROVIDER=mock`，不会调用真实 AI API。要接入阿里云百炼，使用 OpenAI-compatible 模式，不需要新增 `DASHSCOPE_*` 变量：
 
@@ -53,6 +55,21 @@ OPENAI_API_KEY=你的百炼 API Key
 `DEMO_SEED_ENABLED=false` 是真实业务默认值，不会初始化 demo 论文。开发演示或本地 smoke flow 可显式改为 `true`。`DEV_USER_ID=usr_demo` 仅用于开发环境免登录；生产环境应接入正式认证，不依赖该值。
 
 Phase 1 默认验收全部使用 mock AI，不需要也不读取真实 OpenAI Key。
+
+### Agent 来源配置
+
+`POST /api/v1/agent/research-scan:run` 支持按研究方向、发布时间、评分和篇数扫描候选文献。默认正式来源是 OpenAlex/Crossref 官方开放元数据 API；AI 只负责把中文或混合语言研究方向扩展成英文检索计划，篇数、筛选、去重和逐篇分析由后端程序控制。
+
+```text
+OPENALEX_EMAIL=
+AGENT_SOURCE_TIMEOUT_SECONDS=20
+X_MOL_API_BASE_URL=
+X_MOL_API_KEY=
+CNKI_API_BASE_URL=
+CNKI_API_KEY=
+```
+
+OpenAlex/Crossref 通过项目内 `retrieval/openalex.py` 和 `retrieval/crossref.py` 正式适配器调用开放 API。未配置官方/合作 API 时不会抓取 X-MOL/CNKI 搜索页，也不会返回硬编码假论文；CNKI 只允许官方 API、机构合作接口或用户授权导出记录，不保存学校账号、图书馆密码、统一认证密码或长期 Cookie。
 
 ### 数据库模式
 

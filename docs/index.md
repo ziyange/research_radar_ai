@@ -35,6 +35,9 @@
 | [11-future-capability-backlog.md](./11-future-capability-backlog.md) | 原始方案中未进入 MVP 的长期能力追踪 | 产品、研发、管理 |
 | [RR-DEV-008-gap-audit.md](./RR-DEV-008-gap-audit.md) | Phase 1 已实现/未实现、真实通信/mock 边界和后续缺口 | 产品、研发、测试 |
 | [RR-DEV-008-report.md](./RR-DEV-008-report.md) | RR-DEV-008 修复内容、验收命令和浏览器证据 | 产品、研发、测试 |
+| [RR-DEV-009-workbench-agent-ux-plan.md](./RR-DEV-009-workbench-agent-ux-plan.md) | 工作台信息架构、详情承载、二级页面与验收标准 | 产品、设计、前后端、测试 |
+| [RR-DEV-010-current-product-acceptance-audit.md](./RR-DEV-010-current-product-acceptance-audit.md) | 当前产品完成度、模块评分、代码证据、缺口和下一阶段验收动作 | 产品、研发、测试、管理 |
+| [RR-DEV-011-standalone-agent-research-scan.md](./RR-DEV-011-standalone-agent-research-scan.md) | 独立 Agent Research Scan 接口、AI 查询扩展、OpenAlex/Crossref 正式接入、HITL、筛选、去重和 AI 分析验收 | 产品、AI、后端、测试 |
 
 ## 3. 需求编号规则
 

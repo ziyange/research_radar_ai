@@ -85,6 +85,44 @@ class AiProvider:
             return extract_json_object(content)
         return self._mock_profile_payload(one_sentence, project.discipline)
 
+    async def generate_retrieval_plan(
+        self,
+        research_direction: str,
+        profile: ResearchProfile | None,
+    ) -> dict[str, Any]:
+        if self.settings.ai_provider == "openai":
+            self.ensure_configured()
+            prompt = (
+                "你是科研检索规划助手。请把用户的中文或混合语言研究方向转换成可用于 "
+                "OpenAlex 和 Crossref 的英文检索计划。只输出 JSON object，不要 Markdown，"
+                "不要输出思维链。JSON 字段必须包含：mode, original_direction, "
+                "translated_direction_en, queries, keywords_zh, keywords_en, synonyms_en, "
+                "exclusions, confidence, generated_by。queries 必须是 2 到 6 条英文检索式，"
+                "每条适合学术元数据检索；不要决定返回篇数，不要编造论文、DOI、作者或来源。"
+                "keywords_zh、keywords_en、synonyms_en、exclusions 都是字符串数组；"
+                "confidence 为 0 到 1 的数字。"
+                f"\n用户研究方向: {research_direction}"
+                f"\n当前研究画像: {profile.model_dump_json() if profile else '无'}"
+            )
+            content = await self._chat_completion(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "你只输出可被 json.loads 解析的 JSON，不输出解释。",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+            )
+            payload = extract_json_object(content)
+            if not isinstance(payload.get("queries"), list):
+                raise AiOutputValidationError("AI retrieval plan must contain queries array.")
+            payload["mode"] = "ai"
+            payload["original_direction"] = str(payload.get("original_direction") or research_direction)
+            payload["generated_by"] = str(payload.get("generated_by") or self.settings.openai_model)
+            return payload
+        return self._mock_retrieval_plan(research_direction)
+
     async def analyze_paper(
         self,
         paper: Paper,
@@ -136,6 +174,31 @@ class AiProvider:
             else [],
             "exclusions": ["无化学改性的竹材应用", "纯木塑复合材料"] if is_bamboo else [],
             "confidence": 0.82 if is_bamboo else 0.68,
+        }
+
+    def _mock_retrieval_plan(self, text: str) -> dict[str, Any]:
+        terms = [
+            item.strip()
+            for item in re.split(r"[\s,，。；;:：、/|()（）\[\]\-]+", text)
+            if len(item.strip()) >= 2
+        ]
+        latin_terms = [term.lower() for term in terms if re.search(r"[a-zA-Z]", term)]
+        cjk_terms = [term for term in terms if re.search(r"[\u4e00-\u9fff]", term)]
+        base_query = " ".join(latin_terms or terms or [text])
+        queries = [base_query]
+        if latin_terms and len(latin_terms) > 2:
+            queries.append(" ".join(latin_terms[:6]))
+        return {
+            "mode": "rules",
+            "original_direction": text,
+            "translated_direction_en": base_query,
+            "queries": queries,
+            "keywords_zh": cjk_terms,
+            "keywords_en": latin_terms,
+            "synonyms_en": [],
+            "exclusions": [],
+            "confidence": 0.45,
+            "generated_by": "mock-deterministic-query-plan",
         }
 
     def _mock_analysis(
