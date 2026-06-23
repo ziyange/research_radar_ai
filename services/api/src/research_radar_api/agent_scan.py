@@ -163,6 +163,7 @@ class AgentSourceStatus(BaseModel):
 class AgentCandidateAnalysis(BaseModel):
     candidate_id: str
     paper_id: str
+    paper: dict[str, Any]
     analysis_type: Literal["quick", "standard"]
     input_scope: Literal["metadata", "abstract"]
     result: dict[str, Any]
@@ -1017,6 +1018,35 @@ class StandaloneResearchScanAgent:
                     break
         return candidates
 
+    def _paper_snapshot_from_candidate(self, candidate: AgentCandidate, paper: Paper) -> dict[str, Any]:
+        return {
+            "paper_id": paper.id,
+            "candidate_id": candidate.id,
+            "source": candidate.source,
+            "source_mode": candidate.source_mode,
+            "source_identifier": candidate.source_identifier,
+            "matched_query": candidate.matched_query,
+            "title": candidate.title,
+            "title_zh": candidate.title_zh,
+            "authors": candidate.authors,
+            "year": candidate.year,
+            "venue": candidate.venue,
+            "journal": paper.journal,
+            "doi": candidate.doi,
+            "abstract": candidate.abstract,
+            "keywords": candidate.keywords,
+            "url": candidate.url,
+            "fulltext_url": candidate.fulltext_url,
+            "open_access": candidate.open_access,
+            "fulltext_status": paper.fulltext_status,
+            "citation_count": candidate.citation_count,
+            "content_type": candidate.content_type,
+            "compliance_note": candidate.compliance_note,
+            "legal_access_note": (
+                "返回完整论文元数据、DOI、来源链接和开放全文入口；不自动下载或分发受版权保护全文。"
+            ),
+        }
+
     async def _analyze_candidates(
         self,
         payload: AgentScanRequest,
@@ -1039,7 +1069,9 @@ class StandaloneResearchScanAgent:
                 authors=candidate.authors,
                 abstract=candidate.abstract,
                 keywords=candidate.keywords,
-                fulltext_status="unknown",
+                fulltext_status="open_access"
+                if candidate.open_access or candidate.fulltext_url
+                else "unknown",
                 source_count=1,
             )
             try:
@@ -1100,6 +1132,7 @@ class StandaloneResearchScanAgent:
                 AgentCandidateAnalysis(
                     candidate_id=candidate.id,
                     paper_id=paper.id,
+                    paper=self._paper_snapshot_from_candidate(candidate, paper),
                     analysis_type=payload.analysis_type,
                     input_scope=payload.input_scope,
                     result=ai_result["result"],

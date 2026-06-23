@@ -260,6 +260,9 @@ CNKI 真实接入前置条件：
 | `candidates[].duplicate_status` | `new`、`duplicate_knowledge`、`duplicate_paper`。 |
 | `candidates[].open_access` | 开放获取信号。 |
 | `candidates[].fulltext_url` | 适配器发现的开放全文链接。 |
+| `analyses[].paper` | 完整论文元数据快照，包括 title、authors、year、venue、DOI、abstract、keywords、source、url、fulltext_url、open_access、citation_count、合规说明。 |
+| `analyses[].result.paper_metadata` | AI 分析使用的论文元数据快照。 |
+| `analyses[].result.fulltext_availability` | 全文可获取性、输入范围和合法访问限制说明。 |
 | `analyses[].claims` | 复用 `AnalysisClaim`，必须包含事实分级和证据。 |
 | `source_statuses[]` | 每个来源的加载状态、错误码、记录数和 endpoint host。 |
 | `report` | 后端确定性生成的逐篇分析索引，不调用 AI 生成综合报告。 |
@@ -393,6 +396,8 @@ AI 分析必须：
 - 不允许虚构 DOI。
 - 不允许把推测写成原文事实。
 - 写入 `CostRecord`。
+- 返回完整论文元数据快照和合法全文入口，不伪造或分发受版权保护全文。
+- 标准/快速分析至少包含：研究背景、研究问题、研究对象、方法、材料或数据集、实验设计、关键结果、创新点、局限、可借鉴内容、项目适配性、复现提示、风险不确定性、后续问题和深读清单。
 
 验收代码：
 

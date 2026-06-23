@@ -146,6 +146,14 @@ def test_agent_scan_openalex_crossref_analyzes_five_records_and_builds_system_re
     assert len(result["analyses"]) == 5
     assert all(item["claims"] for item in result["analyses"])
     assert all(item["evidence_labels_valid"] for item in result["analyses"])
+    first_analysis = result["analyses"][0]
+    assert first_analysis["paper"]["doi"]
+    assert first_analysis["paper"]["url"]
+    assert "legal_access_note" in first_analysis["paper"]
+    assert first_analysis["result"]["paper_metadata"]["paper_id"] == first_analysis["paper_id"]
+    assert first_analysis["result"]["fulltext_availability"]["legal_access_note"]
+    assert first_analysis["result"]["methodology"]
+    assert first_analysis["result"]["deep_reading_checklist"]
     assert result["report"]["model"] == "deterministic-agent-scan-report"
     assert len(result["report"]["recommended_reading_order"]) == 5
     assert any(step["step"] == "query_expansion" for step in result["trace"])

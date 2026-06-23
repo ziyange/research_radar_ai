@@ -1,5 +1,6 @@
 import json
 import os
+import asyncio
 from collections.abc import Iterator
 
 from fastapi.testclient import TestClient
@@ -18,8 +19,9 @@ client = TestClient(app)
 
 
 class FakeResponse:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, status_code: int = 200) -> None:
         self.content = content
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         return None
@@ -42,6 +44,27 @@ class FakeAsyncClient:
 
     async def post(self, *args, **kwargs) -> FakeResponse:  # noqa: ANN002, ANN003
         return FakeResponse(self.responses.pop(0))
+
+
+class FlakyAsyncClient:
+    attempts = 0
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args) -> None:  # noqa: ANN002
+        return None
+
+    async def post(self, *args, **kwargs) -> FakeResponse:  # noqa: ANN002, ANN003
+        FlakyAsyncClient.attempts += 1
+        if FlakyAsyncClient.attempts == 1:
+            raise ai_module.httpx.RemoteProtocolError(
+                "Server disconnected without sending a response."
+            )
+        return FakeResponse('{"ok": true}')
 
 
 def unwrap(response):
@@ -206,3 +229,19 @@ def test_openai_invalid_json_does_not_write_analysis(monkeypatch):
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "AI_OUTPUT_SCHEMA_INVALID"
+
+
+def test_openai_chat_completion_retries_transient_disconnect(monkeypatch):
+    monkeypatch.setattr(ai_module.httpx, "AsyncClient", FlakyAsyncClient)
+    FlakyAsyncClient.attempts = 0
+    provider = ai_module.AiProvider(openai_settings())
+
+    content = asyncio.run(
+        provider._chat_completion(
+            messages=[{"role": "user", "content": "ping"}],
+            temperature=0,
+        )
+    )
+
+    assert content == '{"ok": true}'
+    assert FlakyAsyncClient.attempts == 2

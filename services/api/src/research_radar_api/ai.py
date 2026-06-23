@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from typing import Any
@@ -18,6 +19,34 @@ FACT_LEVELS = {
 
 DOI_PATTERN = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE)
 JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+ANALYSIS_LIST_FIELDS = {
+    "research_background",
+    "research_problem",
+    "research_object",
+    "methodology",
+    "materials_or_dataset",
+    "experimental_design",
+    "key_results",
+    "innovation_points",
+    "limitations",
+    "borrowable_content",
+    "applicability_to_project",
+    "reproducibility_notes",
+    "risk_and_uncertainty",
+    "follow_up_questions",
+    "deep_reading_checklist",
+}
+ANALYSIS_REQUIRED_FIELDS = {
+    "title_zh",
+    "one_sentence_conclusion",
+    "summary_zh",
+    "relation_to_project",
+    "recommendation_level",
+    "worth_deep_reading",
+    "paper_metadata",
+    "fulltext_availability",
+    *ANALYSIS_LIST_FIELDS,
+}
 
 
 class AiProviderConfigError(RuntimeError):
@@ -38,6 +67,99 @@ def extract_json_object(content: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AiOutputValidationError("AI output JSON must be an object.")
     return payload
+
+
+def paper_metadata_snapshot(paper: Paper) -> dict[str, Any]:
+    return {
+        "paper_id": paper.id,
+        "title": paper.title,
+        "title_zh": paper.title_zh,
+        "authors": paper.authors,
+        "year": paper.year,
+        "journal": paper.journal,
+        "doi": paper.doi,
+        "abstract": paper.abstract,
+        "keywords": paper.keywords,
+        "fulltext_status": paper.fulltext_status,
+        "source_count": paper.source_count,
+    }
+
+
+def fulltext_availability_snapshot(paper: Paper, input_scope: str) -> dict[str, Any]:
+    return {
+        "status": paper.fulltext_status,
+        "input_scope": input_scope,
+        "has_fulltext_input": input_scope == "fulltext",
+        "legal_access_note": (
+            "当前返回完整论文元数据和合法来源入口；未自动下载或转述受版权保护全文。"
+        ),
+        "limitations": (
+            "当前分析基于全文输入。"
+            if input_scope == "fulltext"
+            else "当前分析基于元数据/摘要，实验参数、图表和页码证据需要回到原文核验。"
+        ),
+    }
+
+
+def enrich_analysis_result(
+    result: dict[str, Any],
+    paper: Paper,
+    profile: ResearchProfile | None,
+    analysis_type: str,
+    input_scope: str,
+) -> dict[str, Any]:
+    enriched = dict(result)
+    enriched.setdefault("title_zh", paper.title_zh)
+    enriched.setdefault("one_sentence_conclusion", "需结合摘要和原文判断是否值得深读。")
+    enriched.setdefault("summary_zh", paper.abstract or "当前仅有元数据，需补充摘要或全文后再深读。")
+    enriched.setdefault("relation_to_project", "未提供研究画像，需人工确认与项目关系。")
+    enriched.setdefault(
+        "recommendation_level",
+        "deep_read" if analysis_type == "standard" else "screening",
+    )
+    enriched.setdefault("worth_deep_reading", analysis_type == "standard")
+    enriched["paper_metadata"] = {
+        **paper_metadata_snapshot(paper),
+        **dict(enriched.get("paper_metadata") or {}),
+    }
+    enriched["fulltext_availability"] = {
+        **fulltext_availability_snapshot(paper, input_scope),
+        **dict(enriched.get("fulltext_availability") or {}),
+    }
+    project_focus = []
+    if profile:
+        project_focus = [
+            *profile.research_object[:3],
+            *profile.methods[:3],
+            *profile.materials[:3],
+            *profile.metrics[:3],
+        ]
+    defaults = {
+        "research_background": ["从题名和摘要提取研究背景，需回到原文确认完整语境。"],
+        "research_problem": ["摘要未完整披露研究问题时，应标记为待核验。"],
+        "research_object": [paper.title_zh],
+        "methodology": ["根据摘要/元数据识别方法；完整实验流程需要原文核验。"],
+        "materials_or_dataset": ["材料、样本或数据集未在摘要中完整出现时不得补写。"],
+        "experimental_design": ["当前输入范围不足以恢复完整实验设计。"],
+        "key_results": ["关键结果需优先引用摘要明确表述。"],
+        "innovation_points": ["创新点为 AI 归纳，需与原文引言/讨论核验。"],
+        "limitations": ["当前分析不包含图表、页码和完整实验参数证据。"],
+        "borrowable_content": ["研究问题拆解", "方法路线", "写作背景证据"],
+        "applicability_to_project": project_focus or ["需结合用户项目画像判断适配度。"],
+        "reproducibility_notes": ["记录可复现实验所需参数；摘要缺失时标记为不可追溯。"],
+        "risk_and_uncertainty": ["元数据/摘要级分析可能遗漏条件、对照组和负结果。"],
+        "follow_up_questions": ["原文是否提供完整实验参数、对照组、统计显著性和局限讨论？"],
+        "deep_reading_checklist": ["核验 DOI 与来源", "阅读方法和结果", "检查图表与补充材料"],
+    }
+    for field, default in defaults.items():
+        value = enriched.get(field)
+        if isinstance(value, str):
+            enriched[field] = [value]
+        elif not isinstance(value, list) or not value:
+            enriched[field] = default
+        else:
+            enriched[field] = [str(item) for item in value if str(item).strip()]
+    return enriched
 
 
 class AiProvider:
@@ -265,15 +387,35 @@ class AiProvider:
             ),
         ]
         return {
-            "result": {
+            "result": enrich_analysis_result(
+                {
                 "title_zh": paper.title_zh,
                 "one_sentence_conclusion": "建议纳入首批筛选，并结合摘要判断是否标准研读。",
                 "summary_zh": paper.abstract or "当前仅有元数据，需补充摘要或全文后再深读。",
                 "relation_to_project": relation,
                 "recommendation_level": "high" if analysis_type == "quick" else "deep_read",
                 "worth_deep_reading": True,
+                    "research_background": ["围绕论文题名和摘要识别研究背景。"],
+                    "research_problem": ["判断该文是否解决与用户方向相近的科学或工程问题。"],
+                    "research_object": [paper.title_zh],
+                    "methodology": ["从摘要提取方法路线；未出现的实验细节不补写。"],
+                    "materials_or_dataset": paper.keywords or ["摘要未明确材料或数据集。"],
+                    "experimental_design": ["摘要级输入不足以完整复现实验设计。"],
+                    "key_results": [paper.abstract[:160]] if paper.abstract else ["摘要缺失，关键结果不可追溯。"],
+                    "innovation_points": ["可作为相关方向筛选和标准研读候选。"],
+                    "limitations": ["当前不是全文研读，缺少图表、页码和完整参数。"],
                 "borrowable_content": ["实验路线", "方法对比", "写作背景证据"],
-            },
+                    "applicability_to_project": [relation],
+                    "reproducibility_notes": ["需要原文方法部分核验样品、仪器、对照组和统计方法。"],
+                    "risk_and_uncertainty": ["摘要未披露的信息不得作为原文事实。"],
+                    "follow_up_questions": ["该文是否提供可复现实验参数？", "是否有对照实验和统计显著性？"],
+                    "deep_reading_checklist": ["核验 DOI", "阅读方法", "提取结果图表", "记录局限"],
+                },
+                paper=paper,
+                profile=profile,
+                analysis_type=analysis_type,
+                input_scope=input_scope,
+            ),
             "claims": [claim.model_dump(mode="json") for claim in claims],
             "model": "mock-research-radar",
         }
@@ -289,10 +431,20 @@ class AiProvider:
             "你是科研文献分析助手。请只输出 JSON object，不要 Markdown。"
             "JSON 必须包含 result 和 claims。result 必须包含 title_zh, one_sentence_conclusion, "
             "summary_zh, relation_to_project, recommendation_level, worth_deep_reading, "
-            "borrowable_content。claims 必须是数组，每项包含 claim, fact_level, evidence；"
+            "paper_metadata, fulltext_availability, research_background, research_problem, "
+            "research_object, methodology, materials_or_dataset, experimental_design, key_results, "
+            "innovation_points, limitations, borrowable_content, applicability_to_project, "
+            "reproducibility_notes, risk_and_uncertainty, follow_up_questions, deep_reading_checklist。"
+            "除 paper_metadata、fulltext_availability、worth_deep_reading 外，上述研读维度必须尽量使用字符串数组。"
+            "paper_metadata 用输入论文元数据，不得编造；fulltext_availability 说明是否有全文输入、开放全文状态和限制。"
+            "如果 input_scope 不是 fulltext，必须明确说明当前不是全文研读，不得声称阅读了正文、图表或补充材料。"
+            "claims 必须是数组，每项包含 claim, fact_level, evidence；"
             "fact_level 只能是 source_explicit, ai_summary, cross_paper_comparison, "
             "ai_inference, research_inspiration；evidence 包含 paper_id, section, quote, traceable。"
             "不得虚构 DOI；证据不足时 traceable=false。"
+            "原文片段 quote 必须短，只用于证据定位。"
+            f"\n论文元数据 JSON: {json.dumps(paper_metadata_snapshot(paper), ensure_ascii=False)}"
+            f"\n全文可获取性 JSON: {json.dumps(fulltext_availability_snapshot(paper, input_scope), ensure_ascii=False)}"
             f"\n论文标题: {paper.title}\n摘要: {paper.abstract or '无'}"
             f"\n论文ID: {paper.id}\n论文DOI: {paper.doi or '无'}"
             f"\n用户画像: {profile.model_dump_json() if profile else '无'}"
@@ -311,8 +463,20 @@ class AiProvider:
         payload = extract_json_object(content)
         if not isinstance(payload.get("result"), dict) or not isinstance(payload.get("claims"), list):
             raise AiOutputValidationError("AI analysis output must contain result and claims.")
+        result = enrich_analysis_result(
+            payload["result"],
+            paper=paper,
+            profile=profile,
+            analysis_type=analysis_type,
+            input_scope=input_scope,
+        )
+        missing_fields = sorted(ANALYSIS_REQUIRED_FIELDS - set(result))
+        if missing_fields:
+            raise AiOutputValidationError(
+                f"AI analysis result is missing required fields: {', '.join(missing_fields)}."
+            )
         return {
-            "result": payload["result"],
+            "result": result,
             "claims": payload["claims"],
             "model": self.settings.openai_model,
         }
@@ -331,14 +495,32 @@ class AiProvider:
             "messages": messages,
             "temperature": temperature,
         }
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                f"{self.settings.openai_base_url.rstrip('/')}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
+        content: object | None = None
+        last_exc: httpx.HTTPError | None = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self.settings.ai_request_timeout_seconds
+                ) as client:
+                    response = await client.post(
+                        f"{self.settings.openai_base_url.rstrip('/')}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    )
+                    if response.status_code == 429 or response.status_code >= 500:
+                        response.raise_for_status()
+                    response.raise_for_status()
+                    content = response.json()["choices"][0]["message"]["content"]
+                    break
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt == 1:
+                    raise
+                await asyncio.sleep(1.5)
+        else:
+            if last_exc:
+                raise last_exc
+            raise AiOutputValidationError("AI response was not returned.")
         if not isinstance(content, str):
             raise AiOutputValidationError("AI response content must be a string.")
         return content

@@ -66,6 +66,29 @@ def test_quick_and_standard_analysis_record_costs_and_fact_levels():
     }
     assert quick["evidence_labels_valid"] is True
     assert standard["evidence_labels_valid"] is True
+    result = standard["result"]
+    for field in [
+        "paper_metadata",
+        "fulltext_availability",
+        "research_background",
+        "research_problem",
+        "research_object",
+        "methodology",
+        "materials_or_dataset",
+        "experimental_design",
+        "key_results",
+        "innovation_points",
+        "limitations",
+        "applicability_to_project",
+        "reproducibility_notes",
+        "risk_and_uncertainty",
+        "follow_up_questions",
+        "deep_reading_checklist",
+    ]:
+        assert field in result
+    assert result["paper_metadata"]["paper_id"] == "paper_bamboo_oxidation"
+    assert result["fulltext_availability"]["legal_access_note"]
+    assert isinstance(result["methodology"], list)
 
     costs = unwrap(client.get("/api/v1/me/costs"))
     quick_cost = next(item for item in costs if item["id"] == quick["cost_record_id"])
