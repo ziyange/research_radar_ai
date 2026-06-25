@@ -20,6 +20,12 @@ FACT_LEVELS = {
 DOI_PATTERN = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE)
 JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 ANALYSIS_LIST_FIELDS = {
+    "title_translation_notes",
+    "abstract_translation_zh",
+    "paper_core_contribution",
+    "paper_deep_analysis",
+    "researcher_interest_points",
+    "literature_matching_directions",
     "research_background",
     "research_problem",
     "research_object",
@@ -111,7 +117,10 @@ def enrich_analysis_result(
     enriched = dict(result)
     enriched.setdefault("title_zh", paper.title_zh)
     enriched.setdefault("one_sentence_conclusion", "需结合摘要和原文判断是否值得深读。")
-    enriched.setdefault("summary_zh", paper.abstract or "当前仅有元数据，需补充摘要或全文后再深读。")
+    enriched.setdefault(
+        "summary_zh",
+        paper.abstract or "当前仅有元数据，需补充摘要或全文后再深读。",
+    )
     enriched.setdefault("relation_to_project", "未提供研究画像，需人工确认与项目关系。")
     enriched.setdefault(
         "recommendation_level",
@@ -135,6 +144,24 @@ def enrich_analysis_result(
             *profile.metrics[:3],
         ]
     defaults = {
+        "title_translation_notes": [
+            "给出论文标题的准确中文翻译；专有名词、材料名和方法名应保留可核验英文。"
+        ],
+        "abstract_translation_zh": [
+            "完整翻译摘要；如果摘要缺失，必须说明无法完成摘要翻译。"
+        ],
+        "paper_core_contribution": [
+            "概括论文自身解决的核心问题、主要贡献和结果边界。"
+        ],
+        "paper_deep_analysis": [
+            "从研究问题、方法设计、结果证据、创新性和局限性分析论文本身的阅读价值。"
+        ],
+        "researcher_interest_points": [
+            "研究人员通常会重点关注可复现实验条件、变量控制、对照组、关键结果和可迁移方法。"
+        ],
+        "literature_matching_directions": [
+            "按研究对象/材料、方法/技术路线、指标/结果、机制、应用场景、时间范围、证据类型和排除条件判断匹配度。"
+        ],
         "research_background": ["从题名和摘要提取研究背景，需回到原文确认完整语境。"],
         "research_problem": ["摘要未完整披露研究问题时，应标记为待核验。"],
         "research_object": [paper.title_zh],
@@ -431,11 +458,23 @@ class AiProvider:
             "你是科研文献分析助手。请只输出 JSON object，不要 Markdown。"
             "JSON 必须包含 result 和 claims。result 必须包含 title_zh, one_sentence_conclusion, "
             "summary_zh, relation_to_project, recommendation_level, worth_deep_reading, "
-            "paper_metadata, fulltext_availability, research_background, research_problem, "
-            "research_object, methodology, materials_or_dataset, experimental_design, key_results, "
-            "innovation_points, limitations, borrowable_content, applicability_to_project, "
-            "reproducibility_notes, risk_and_uncertainty, follow_up_questions, deep_reading_checklist。"
+            "paper_metadata, fulltext_availability, title_translation_notes, abstract_translation_zh, "
+            "paper_core_contribution, paper_deep_analysis, researcher_interest_points, "
+            "literature_matching_directions, research_background, research_problem, research_object, "
+            "methodology, materials_or_dataset, experimental_design, key_results, innovation_points, "
+            "limitations, borrowable_content, applicability_to_project, reproducibility_notes, "
+            "risk_and_uncertainty, follow_up_questions, deep_reading_checklist。"
             "除 paper_metadata、fulltext_availability、worth_deep_reading 外，上述研读维度必须尽量使用字符串数组。"
+            "title_zh 必须是论文英文标题的准确中文翻译；title_translation_notes 说明关键术语如何翻译。"
+            "abstract_translation_zh 必须完整翻译输入摘要，不要只总结；若无摘要，说明摘要缺失。"
+            "summary_zh 是摘要后的凝练总结，不得替代 abstract_translation_zh。"
+            "paper_core_contribution 必须回答论文自身到底解决了什么问题、贡献是什么。"
+            "paper_deep_analysis 必须深入分析论文本身：研究问题、方法设计、证据强度、结果边界、局限。"
+            "researcher_interest_points 必须站在研究人员阅读文献的角度，指出最值得追问和摘录的内容。"
+            "literature_matching_directions 必须按文献筛选维度判断匹配方向："
+            "研究对象/材料体系、方法/技术路线、指标/结局、作用机制、应用场景、"
+            "发表时间与时效性、证据类型/研究设计、全文可获取性、与用户排除项的冲突、"
+            "是否能支持研究空白或方法迁移；每一项都要写明匹配/部分匹配/不匹配及依据。"
             "paper_metadata 用输入论文元数据，不得编造；fulltext_availability 说明是否有全文输入、开放全文状态和限制。"
             "如果 input_scope 不是 fulltext，必须明确说明当前不是全文研读，不得声称阅读了正文、图表或补充材料。"
             "claims 必须是数组，每项包含 claim, fact_level, evidence；"

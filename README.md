@@ -174,7 +174,7 @@ bash scripts/check_phase1.sh
 
 ```powershell
 python -m pytest
-ruff check
+ruff check --no-cache
 npm run lint:web
 npx tsc --noEmit --project apps/web/tsconfig.json
 npm run build

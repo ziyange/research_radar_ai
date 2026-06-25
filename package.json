@@ -4,11 +4,14 @@
   "private": true,
   "scripts": {
     "dev:web": "npm --workspace apps/web run dev",
+    "dev:reader": "npm --workspace apps/literature-reader run dev",
+    "start:reader": "npm --workspace apps/literature-reader run start",
+    "build:reader": "npm --workspace apps/literature-reader run build",
     "build": "npm --workspace apps/web run build",
     "lint:web": "npm --workspace apps/web run lint"
   },
   "workspaces": [
-    "apps/web"
+    "apps/web",
+    "apps/literature-reader"
   ]
 }
-

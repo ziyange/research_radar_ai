@@ -153,6 +153,10 @@ def test_agent_scan_openalex_crossref_analyzes_five_records_and_builds_system_re
     assert "legal_access_note" in first_analysis["paper"]
     assert first_analysis["result"]["paper_metadata"]["paper_id"] == first_analysis["paper_id"]
     assert first_analysis["result"]["fulltext_availability"]["legal_access_note"]
+    assert first_analysis["result"]["abstract_translation_zh"]
+    assert first_analysis["result"]["paper_deep_analysis"]
+    assert first_analysis["result"]["researcher_interest_points"]
+    assert first_analysis["result"]["literature_matching_directions"]
     assert first_analysis["result"]["methodology"]
     assert first_analysis["result"]["deep_reading_checklist"]
     assert result["report"]["model"] == "deterministic-agent-scan-report"

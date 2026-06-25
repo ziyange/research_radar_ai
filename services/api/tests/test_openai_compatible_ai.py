@@ -156,6 +156,14 @@ def test_openai_compatible_analysis_writes_claims_and_cost(monkeypatch):
                     "relation_to_project": "高度相关",
                     "recommendation_level": "deep_read",
                     "worth_deep_reading": True,
+                    "title_translation_notes": ["Periodate oxidation 翻译为高碘酸钠氧化。"],
+                    "abstract_translation_zh": ["这是摘要的完整中文翻译。"],
+                    "paper_core_contribution": ["论文说明氧化与二胺改性可形成材料界面证据。"],
+                    "paper_deep_analysis": ["该文需要重点核验方法、对照组、界面结合证据和性能边界。"],
+                    "researcher_interest_points": ["研究人员会关注反应条件、材料表征、性能指标和可复现参数。"],
+                    "literature_matching_directions": [
+                        "研究对象/材料体系：匹配脱木质素竹材；方法/技术路线：匹配高碘酸钠氧化和二胺改性。"
+                    ],
                     "borrowable_content": ["方法路线"],
                 },
                 "claims": [

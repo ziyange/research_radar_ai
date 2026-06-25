@@ -70,6 +70,12 @@ def test_quick_and_standard_analysis_record_costs_and_fact_levels():
     for field in [
         "paper_metadata",
         "fulltext_availability",
+        "title_translation_notes",
+        "abstract_translation_zh",
+        "paper_core_contribution",
+        "paper_deep_analysis",
+        "researcher_interest_points",
+        "literature_matching_directions",
         "research_background",
         "research_problem",
         "research_object",

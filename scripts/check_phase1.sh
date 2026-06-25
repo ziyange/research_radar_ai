@@ -16,7 +16,7 @@ run_step() {
 }
 
 run_step "Backend tests" python -m pytest
-run_step "Ruff" ruff check
+run_step "Ruff" ruff check --no-cache
 run_step "Web lint" npm run lint:web
 run_step "Web typecheck" npx tsc --noEmit --project apps/web/tsconfig.json
 run_step "Web build" npm run build

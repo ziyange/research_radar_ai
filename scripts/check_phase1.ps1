@@ -20,7 +20,7 @@ $env:RUN_POSTGRES_TESTS = "0"
 $env:NEXT_PUBLIC_API_BASE_URL = "http://127.0.0.1:8010/api/v1"
 
 Invoke-Step "Backend tests" { python -m pytest }
-Invoke-Step "Ruff" { ruff check }
+Invoke-Step "Ruff" { ruff check --no-cache }
 Invoke-Step "Web lint" { npm run lint:web }
 Invoke-Step "Web typecheck" { npx tsc --noEmit --project apps/web/tsconfig.json }
 Invoke-Step "Web build" { npm run build }

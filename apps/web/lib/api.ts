@@ -125,6 +125,35 @@ export type SourceRecord = {
   paper_id: string | null;
 };
 
+export type Paper = {
+  id: string;
+  title: string;
+  title_zh: string;
+  year: number;
+  journal: string;
+  doi: string | null;
+  authors: string[];
+  abstract: string | null;
+  keywords: string[];
+  fulltext_status: "open_access" | "author_manuscript" | "repository" | "unknown";
+  source_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PaperVersion = {
+  id: string;
+  paper_id: string;
+  source: string;
+  source_identifier: string;
+  version_type: "preprint" | "published" | "early_access" | "author_manuscript" | "unknown";
+  title: string | null;
+  url: string | null;
+  fulltext_url: string | null;
+  license: string | null;
+  quality_score: number;
+};
+
 export type Recommendation = {
   id: string;
   project_id: string;
@@ -324,6 +353,11 @@ export type RecommendationList = {
   next_cursor: string | null;
 };
 
+export type RadarSettings = {
+  current_focus: ResearchProfile | null;
+  quick_controls: string[];
+};
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (DEV_USER_ID) {
@@ -422,6 +456,8 @@ export const api = {
     request<SourceRecord[]>(`/search-tasks/${taskId}/source-records`),
   recommendations: (projectId: string) =>
     request<RecommendationList>(`/projects/${projectId}/recommendations`),
+  recommendation: (recommendationId: string) =>
+    request<Recommendation>(`/recommendations/${recommendationId}`),
   refreshRecommendations: (projectId: string) =>
     request<RecommendationList>(`/projects/${projectId}/recommendations:refresh`, {
       method: "POST",
@@ -446,6 +482,9 @@ export const api = {
         input_scope: analysisType === "standard" ? "abstract" : "abstract",
       }),
     }),
+  paper: (paperId: string) => request<Paper>(`/papers/${paperId}`),
+  paperVersions: (paperId: string) => request<PaperVersion[]>(`/papers/${paperId}/versions`),
+  paperAnalyses: (paperId: string) => request<PaperAnalysis[]>(`/papers/${paperId}/analysis`),
   addKnowledge: (
     projectId: string,
     payload: {
@@ -463,15 +502,38 @@ export const api = {
     request<KnowledgeItem[]>(
       `/projects/${projectId}/knowledge:search?q=${encodeURIComponent(query)}`
     ),
+  knowledge: (projectId: string) => request<KnowledgeItem[]>(`/projects/${projectId}/knowledge`),
+  knowledgeItem: (itemId: string) => request<KnowledgeItem>(`/knowledge/${itemId}`),
+  updateKnowledge: (
+    itemId: string,
+    payload: Partial<Pick<KnowledgeItem, "status" | "tags" | "note">>
+  ) =>
+    request<KnowledgeItem>(`/knowledge/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   generateReport: (projectId: string, reportType: "daily" | "weekly" = "daily") =>
     request<RadarReport>(
       `/projects/${projectId}/reports:generate?report_type=${reportType}`,
       { method: "POST" }
     ),
   reports: (projectId: string) => request<RadarReport[]>(`/projects/${projectId}/reports`),
+  report: (reportId: string) => request<RadarReport>(`/reports/${reportId}`),
   messages: () => request<Message[]>("/messages"),
+  message: (messageId: string) => request<Message>(`/messages/${messageId}`),
   markMessageRead: (messageId: string) =>
     request<Message>(`/messages/${messageId}:read`, { method: "POST" }),
+  retryTask: (taskId: string) =>
+    request<TaskStatus>(`/tasks/${taskId}:retry`, {
+      method: "POST",
+    }),
+  radarSettings: (projectId: string) =>
+    request<RadarSettings>(`/projects/${projectId}/radar-settings`),
+  updateRadarSettings: (projectId: string, payload: Record<string, unknown>) =>
+    request<{ preferences: Record<string, unknown> }>(`/projects/${projectId}/radar-settings`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   emailPreference: () => request<EmailPreference>("/me/email-preference"),
   unsubscribeEmail: () =>
     request<EmailPreference>("/me/email:unsubscribe", {
