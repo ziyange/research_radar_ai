@@ -7,9 +7,14 @@ import {
   Database,
   DownloadSimple,
   FileText,
+  Lightning,
   LinkSimple,
   MagnifyingGlass,
+  PencilSimple,
+  Plus,
+  Play,
   Trash,
+  X,
 } from "@phosphor-icons/react";
 import "./styles.css";
 
@@ -20,6 +25,7 @@ const defaultScan = {
   minScore: 70,
   sources: ["openalex", "crossref"],
   downloadOpenPdf: true,
+  autoAnalyze: false,
 };
 
 const api = {
@@ -32,6 +38,47 @@ const api = {
     const response = await fetch("/api/health");
     if (!response.ok) throw new Error("本地服务未就绪");
     return response.json();
+  },
+  async getTasks() {
+    const response = await fetch("/api/tasks");
+    if (!response.ok) throw new Error("无法读取采集任务");
+    return response.json();
+  },
+  async createTask(payload) {
+    const response = await fetch("/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "创建任务失败");
+    return data;
+  },
+  async updateTask(id, payload) {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "更新任务失败");
+    return data;
+  },
+  async deleteTask(id) {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "删除任务失败");
+    return data;
+  },
+  async runTask(id) {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(id)}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.run?.error || data.error || "执行任务失败");
+    return data;
   },
   async scan(payload) {
     const response = await fetch("/api/scan", {
@@ -260,7 +307,7 @@ function renderMarkdown(markdown) {
 export function App() {
   const [library, setLibrary] = useState({ papers: [], scanRuns: [], reports: [] });
   const [health, setHealth] = useState(null);
-  const [scan, setScan] = useState(defaultScan);
+  const [tasks, setTasks] = useState([]);
   const [selectedPaperId, setSelectedPaperId] = useState(null);
   const [activeView, setActiveView] = useState("library");
   const [libraryExpanded, setLibraryExpanded] = useState(true);
@@ -269,18 +316,24 @@ export function App() {
   const [readingMode, setReadingMode] = useState("analysis");
   const [paperMarkdown, setPaperMarkdown] = useState("");
   const [status, setStatus] = useState({ tone: "idle", message: "准备就绪" });
-  const [scanLogs, setScanLogs] = useState([
-    { tone: "idle", text: "等待采集任务。输入研究方向后，系统会检索数据源、评分、去重并保存。" },
-  ]);
   const [loading, setLoading] = useState(null);
+  const [runningTaskIds, setRunningTaskIds] = useState({});
   const [analyzingPaperIds, setAnalyzingPaperIds] = useState({});
   const [fetchingFullTextIds, setFetchingFullTextIds] = useState({});
   const [error, setError] = useState("");
+  const [taskModal, setTaskModal] = useState(null);
+  const [expandedRunIds, setExpandedRunIds] = useState({});
+  const [runAnalyzeState, setRunAnalyzeState] = useState({});
 
   async function refresh() {
-    const [libraryData, healthData] = await Promise.all([api.getLibrary(), api.getHealth()]);
+    const [libraryData, healthData, tasksData] = await Promise.all([
+      api.getLibrary(),
+      api.getHealth(),
+      api.getTasks(),
+    ]);
     setLibrary(libraryData);
     setHealth(healthData);
+    setTasks(tasksData.tasks || []);
     setSelectedPaperId((current) => current || libraryData.papers?.[0]?.id || null);
   }
 
@@ -333,57 +386,136 @@ export function App() {
       .catch(() => setPaperMarkdown(""));
   }, [selectedPaper?.id, selectedPaper?.localFullTextUrl, selectedPaper?.localMarkdownUrl]);
 
-  async function runScan() {
+  async function saveTask(form) {
     setError("");
-    setLoading("scan");
-    setScanLogs([
-      { tone: "running", text: `理解研究方向：${scan.query || "未填写"}` },
-      { tone: "running", text: `规划检索：来源 ${scan.sources.join(" / ")}，目标 ${scan.count} 篇，起始年份 ${scan.yearFrom || "不限"}，最低评分 ${scan.minScore}` },
-      { tone: "running", text: "执行检索、评分、去重，并尝试下载开放 PDF 或抽取公开全文。" },
-    ]);
+    setLoading("task-save");
     try {
-      const data = await api.scan(scan);
-      setLibrary(data.library);
-      setSelectedPaperId((current) => current || data.papers?.[0]?.id || null);
-      const noNewReason =
-        data.run.savedCount === 0
-          ? data.run.uniqueCount === 0
-            ? "没有新增入库：达到阈值的候选文献都已存在于本地库。"
-            : "没有新增入库：存在可新增候选，但保存阶段没有成功写入，请检查本地文件权限。"
-          : "";
-      setScanLogs((current) => [
-        ...current,
-        {
-          tone: data.run.savedCount > 0 ? "success" : "warning",
-          text: `完成：目标 ${data.run.count} 篇，保存 ${data.run.savedCount} 篇，可新增 ${data.run.uniqueCount ?? data.papers?.length ?? 0} 篇，去重 ${data.run.duplicateCount} 篇，候选 ${data.run.candidateCount} 篇。`,
-        },
-        ...(data.run.targetMet === false && data.run.exhaustedReason
-          ? [{ tone: "warning", text: `未拿满目标：${data.run.exhaustedReason}。可降低最低评分、放宽年份或扩展研究方向。` }]
-          : []),
-        ...(noNewReason ? [{ tone: "warning", text: noNewReason }] : []),
-        ...(data.run.queryPlan || []).map((item, index) => ({
-          tone: item.source === "user" ? "running" : "success",
-          text: `检索式 ${index + 1}: ${item.query}`,
-        })),
-        ...(data.run.duplicateTitles || []).slice(0, 5).map((title) => ({
-          tone: "warning",
-          text: `已去重：${title}`,
-        })),
-        ...(data.run.sourceStatuses || []).map((item) => ({
-          tone: item.status === "succeeded" ? "success" : "error",
-          text: `${item.source} / ${item.query || scan.query}: ${item.status === "succeeded" ? `拉取 ${item.count} 条` : item.error}`,
-        })),
-      ]);
-      setStatus({
-        tone: data.run.savedCount > 0 ? "success" : "warning",
-        message: data.run.savedCount > 0 ? `已保存 ${data.run.savedCount} 篇` : "未发现新的可入库文献",
-      });
+      if (taskModal?.id) {
+        const updated = await api.updateTask(taskModal.id, form);
+        setTasks((current) => current.map((t) => (t.id === updated.id ? updated : t)));
+        setStatus({ tone: "success", message: "任务配置已更新" });
+      } else {
+        const created = await api.createTask(form);
+        setTasks((current) => [created, ...current]);
+        setStatus({ tone: "success", message: "已新增采集任务" });
+      }
+      setTaskModal(null);
     } catch (err) {
       setError(err.message);
-      setScanLogs((current) => [...current, { tone: "error", text: `失败：${err.message}` }]);
       setStatus({ tone: "error", message: err.message });
     } finally {
       setLoading(null);
+    }
+  }
+
+  async function deleteTask(task) {
+    if (!task) return;
+    const ok = window.confirm(`删除该采集任务？\n\n${task.query}`);
+    if (!ok) return;
+    setError("");
+    setLoading(`task-delete-${task.id}`);
+    try {
+      await api.deleteTask(task.id);
+      setTasks((current) => current.filter((t) => t.id !== task.id));
+      setStatus({ tone: "success", message: "已删除采集任务" });
+    } catch (err) {
+      setError(err.message);
+      setStatus({ tone: "error", message: err.message });
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  function runStatusFor(taskId, run) {
+    if (runningTaskIds[taskId]) return "running";
+    if (!run) return "idle";
+    if (run._failed) return "failed";
+    return "done";
+  }
+
+  function latestRunForTask(taskId) {
+    return (library.scanRuns || []).find((r) => r.taskId === taskId) || null;
+  }
+
+  async function runScan(task) {
+    if (!task || runningTaskIds[task.id]) return;
+    setError("");
+    setRunningTaskIds((current) => ({ ...current, [task.id]: true }));
+    setStatus({ tone: "running", message: `正在执行：${short(task.query, 42)}` });
+    try {
+      const data = await api.runTask(task.id);
+      setLibrary(data.library);
+      setSelectedPaperId((current) => current || data.papers?.[0]?.id || null);
+      setStatus({
+        tone: data.run.savedCount > 0 ? "success" : "warning",
+        message:
+          data.run.savedCount > 0
+            ? `已保存 ${data.run.savedCount} 篇`
+            : "未发现新的可入库文献",
+      });
+      if (task.autoAnalyze && data.run.savedPaperIds?.length) {
+        runAutoAnalysis(data.run.savedPaperIds, task.query, data.run.id);
+      }
+    } catch (err) {
+      setError(err.message);
+      setStatus({ tone: "error", message: err.message });
+      const failed = {
+        id: `scan_failed_${Date.now()}`,
+        taskId: task.id,
+        query: task.query,
+        count: task.count,
+        createdAt: new Date().toISOString(),
+        savedCount: 0,
+        candidateCount: 0,
+        uniqueCount: 0,
+        duplicateCount: 0,
+        savedPaperIds: [],
+        sourceStatuses: [],
+        queryPlan: [],
+        duplicateTitles: [],
+        _failed: true,
+        _errorMessage: err.message,
+        targetMet: false,
+        exhaustedReason: err.message,
+      };
+      setLibrary((current) => ({
+        ...current,
+        scanRuns: [failed, ...(current.scanRuns || [])].slice(0, 30),
+      }));
+    } finally {
+      setRunningTaskIds((current) => {
+        const next = { ...current };
+        delete next[task.id];
+        return next;
+      });
+    }
+  }
+
+  async function runAutoAnalysis(paperIds, query, runId) {
+    const remaining = [...paperIds];
+    setRunAnalyzeState((current) => ({
+      ...current,
+      [runId]: { total: paperIds.length, done: 0, paperIds: [...paperIds] },
+    }));
+    for (const paperId of remaining) {
+      try {
+        const paper = (library.papers || []).find((p) => p.id === paperId);
+        const data = await api.analyze({
+          paperIds: [paperId],
+          query: query || paper?.title || "",
+          title: `${paper?.title || "本地文献"} AI 阅读报告`,
+          limit: 1,
+        });
+        setLibrary(data.library);
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setRunAnalyzeState((current) => {
+          const state = current[runId];
+          if (!state) return current;
+          return { ...current, [runId]: { ...state, done: state.done + 1 } };
+        });
+      }
     }
   }
 
@@ -402,7 +534,7 @@ export function App() {
     try {
       const data = await api.analyze({
         paperIds,
-        query: scan.query || paper.title,
+        query: paper.title,
         title: `${paper.title} AI 阅读报告`,
         limit: 1,
       });
@@ -462,15 +594,6 @@ export function App() {
         return next;
       });
     }
-  }
-
-  function toggleSource(source) {
-    setScan((current) => {
-      const sources = current.sources.includes(source)
-        ? current.sources.filter((item) => item !== source)
-        : [...current.sources, source];
-      return { ...current, sources: sources.length ? sources : [source] };
-    });
   }
 
   const selectedReportMarkdown =
@@ -561,42 +684,74 @@ export function App() {
         {error ? <div className="error-strip">{error}</div> : null}
 
         {activeView === "scan" ? (
-          <section className="workspace-panel scan-workspace">
-            <div className="workspace-title">
-              <span>采集任务</span>
-              <h1>配置一次自动化文献采集</h1>
-              <p>输入研究方向、数量、年份和评分要求，系统会检索开放数据源、评分、去重、保存，并尝试获取 PDF 或公开全文。</p>
+          <section className="workspace-panel scan-workspace task-workspace">
+            <div className="task-list-header">
+              <div className="workspace-title">
+                <span>采集任务</span>
+                <h1>采集任务列表</h1>
+                <p>管理可复用的文献采集任务，一键执行或编辑配置。勾选 AI 分析的任务在采集入库后会自动逐篇分析。</p>
+              </div>
+              <button className="add-task-btn" type="button" onClick={() => setTaskModal({ mode: "create" })}>
+                <Plus size={16} weight="bold" />
+                新增任务
+              </button>
             </div>
-            <label>
-              研究方向
-              <textarea value={scan.query} onChange={(event) => setScan({ ...scan, query: event.target.value })} placeholder="例如：纳米材料 植物 胁迫 响应" />
-            </label>
-            <div className="form-grid wide-form-grid">
-              <label>
-                篇数
-                <input type="number" min="1" max="20" value={scan.count} onChange={(event) => setScan({ ...scan, count: event.target.value })} />
-              </label>
-              <label>
-                起始年份
-                <input type="number" value={scan.yearFrom} onChange={(event) => setScan({ ...scan, yearFrom: event.target.value })} />
-              </label>
-              <label>
-                最低评分
-                <input type="number" min="0" max="100" value={scan.minScore} onChange={(event) => setScan({ ...scan, minScore: event.target.value })} />
-              </label>
-              <label className="switch-row">
-                下载开放 PDF
-                <input type="checkbox" checked={scan.downloadOpenPdf} onChange={(event) => setScan({ ...scan, downloadOpenPdf: event.target.checked })} />
-              </label>
+            <div className="task-list">
+              {tasks.length ? (
+                tasks.map((task) => (
+                  <div className="task-row" key={task.id}>
+                    <div className="task-row-top">
+                      <div className="task-query">{task.query}</div>
+                      <div className="task-actions">
+                        <button
+                          className="task-run-btn"
+                          type="button"
+                          disabled={Boolean(runningTaskIds[task.id])}
+                          onClick={() => runScan(task)}
+                        >
+                          <Play size={14} weight="fill" />
+                          {runningTaskIds[task.id] ? "执行中" : "执行"}
+                        </button>
+                        <button
+                          className="task-edit-btn"
+                          type="button"
+                          disabled={loading === `task-delete-${task.id}`}
+                          onClick={() => setTaskModal({ mode: "edit", id: task.id, ...task })}
+                        >
+                          <PencilSimple size={14} />
+                          编辑
+                        </button>
+                        <button
+                          className="task-delete-btn"
+                          type="button"
+                          disabled={loading === `task-delete-${task.id}`}
+                          onClick={() => deleteTask(task)}
+                        >
+                          <Trash size={14} />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="task-meta">
+                      <span className="task-tag">{task.count} 篇</span>
+                      <span className="task-tag">{task.yearFrom ? `${task.yearFrom} 起` : "不限年份"}</span>
+                      <span className="task-tag">评分≥{task.minScore}</span>
+                      {task.sources?.map((src) => (
+                        <span className="task-tag" key={src}>{src === "openalex" ? "OpenAlex" : "Crossref"}</span>
+                      ))}
+                      <span className={`task-tag ${task.downloadOpenPdf ? "on" : ""}`}>
+                        {task.downloadOpenPdf ? "下载 PDF" : "不下载 PDF"}
+                      </span>
+                      <span className={`task-tag ${task.autoAnalyze ? "on" : ""}`}>
+                        <Brain size={12} />
+                        {task.autoAnalyze ? "AI 分析" : "不分析"}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="empty-state">暂无采集任务，点击右上角“新增任务”创建。</div>
+              )}
             </div>
-            <div className="source-toggles">
-              <button className={scan.sources.includes("openalex") ? "active" : ""} onClick={() => toggleSource("openalex")}>OpenAlex</button>
-              <button className={scan.sources.includes("crossref") ? "active" : ""} onClick={() => toggleSource("crossref")}>Crossref</button>
-            </div>
-            <button className="primary workspace-action" onClick={runScan} disabled={loading === "scan"}>
-              <DownloadSimple size={17} />
-              {loading === "scan" ? "检索中" : "确认并开始采集"}
-            </button>
           </section>
         ) : null}
 
@@ -688,21 +843,15 @@ export function App() {
 
       <aside className="inspector-panel">
         {activeView === "scan" ? (
-          <div className="paper-inspector">
-            <div className="paper-heading">
-              <span>Agent Log</span>
-              <h2>采集执行日志</h2>
-              <p>这里展示系统如何理解任务、选择数据源、检索、去重和保存。</p>
-            </div>
-            <div className="scan-log-list">
-              {scanLogs.map((item, index) => (
-                <div className={`scan-log-item ${item.tone}`} key={`${item.text}-${index}`}>
-                  <span>{index + 1}</span>
-                  <p>{item.text}</p>
-                </div>
-              ))}
-            </div>
-          </div>
+          <RunLogList
+            scanRuns={library.scanRuns || []}
+            papers={library.papers || []}
+            runningTaskIds={runningTaskIds}
+            tasks={tasks}
+            expandedRunIds={expandedRunIds}
+            setExpandedRunIds={setExpandedRunIds}
+            runAnalyzeState={runAnalyzeState}
+          />
         ) : null}
 
         {activeView === "library" ? (
@@ -782,7 +931,293 @@ export function App() {
           )
         ) : null}
       </aside>
+
+      {taskModal ? (
+        <TaskModal
+          mode={taskModal.mode}
+          initial={taskModal.mode === "edit" ? taskModal : defaultScan}
+          loading={loading === "task-save"}
+          onClose={() => setTaskModal(null)}
+          onSave={saveTask}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function TaskModal({ mode, initial, loading, onClose, onSave }) {
+  const [form, setForm] = useState({
+    query: initial.query || "",
+    count: initial.count ?? 5,
+    yearFrom: initial.yearFrom ?? new Date().getFullYear() - 5,
+    minScore: initial.minScore ?? 70,
+    sources: initial.sources?.length ? [...initial.sources] : ["openalex", "crossref"],
+    downloadOpenPdf: initial.downloadOpenPdf !== false,
+    autoAnalyze: Boolean(initial.autoAnalyze),
+  });
+
+  function update(field, value) {
+    setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function toggleSource(source) {
+    setForm((current) => {
+      const sources = current.sources.includes(source)
+        ? current.sources.filter((item) => item !== source)
+        : [...current.sources, source];
+      return { ...current, sources: sources.length ? sources : [source] };
+    });
+  }
+
+  function submit(event) {
+    event.preventDefault();
+    onSave({
+      ...form,
+      count: Number(form.count) || 5,
+      yearFrom: form.yearFrom ? Number(form.yearFrom) : null,
+      minScore: Number(form.minScore) || 0,
+    });
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <form className="modal-card" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <div className="modal-header">
+          <h2>{mode === "edit" ? "编辑采集任务" : "新增采集任务"}</h2>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="关闭">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="modal-body">
+          <label>
+            研究方向
+            <textarea
+              value={form.query}
+              onChange={(event) => update("query", event.target.value)}
+              placeholder="例如：纳米材料 植物 胁迫 响应"
+              required
+            />
+          </label>
+          <div className="form-grid">
+            <label>
+              篇数
+              <input
+                type="number"
+                min="1"
+                max="20"
+                value={form.count}
+                onChange={(event) => update("count", event.target.value)}
+              />
+            </label>
+            <label>
+              起始年份
+              <input
+                type="number"
+                value={form.yearFrom || ""}
+                onChange={(event) => update("yearFrom", event.target.value)}
+              />
+            </label>
+            <label>
+              最低评分
+              <input
+                type="number"
+                min="0"
+                max="100"
+                value={form.minScore}
+                onChange={(event) => update("minScore", event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="source-toggles">
+            <button
+              type="button"
+              className={form.sources.includes("openalex") ? "active" : ""}
+              onClick={() => toggleSource("openalex")}
+            >
+              OpenAlex
+            </button>
+            <button
+              type="button"
+              className={form.sources.includes("crossref") ? "active" : ""}
+              onClick={() => toggleSource("crossref")}
+            >
+              Crossref
+            </button>
+          </div>
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={form.downloadOpenPdf}
+              onChange={(event) => update("downloadOpenPdf", event.target.checked)}
+            />
+            下载开放 PDF
+          </label>
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={form.autoAnalyze}
+              onChange={(event) => update("autoAnalyze", event.target.checked)}
+            />
+            <span>
+              AI 分析
+              <small style={{ display: "block", fontWeight: 500, color: "#7a8581" }}>
+                采集入库后自动逐篇调用 AI 分析
+              </small>
+            </span>
+          </label>
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="btn-ghost" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="primary" disabled={loading || !form.query.trim()}>
+            {loading ? "保存中" : "保存"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function runStatusLabel(run, runningTaskIds, tasks) {
+  if (run._failed) return { key: "failed", text: "执行失败" };
+  const task = tasks.find((t) => t.id === run.taskId);
+  if (task && runningTaskIds[task.id]) return { key: "running", text: "执行中" };
+  if (run.savedCount !== undefined) return { key: "done", text: "已完成" };
+  return { key: "done", text: "已完成" };
+}
+
+function formatRunTime(iso) {
+  if (!iso) return "";
+  try {
+    const date = new Date(iso);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  } catch {
+    return iso;
+  }
+}
+
+function RunLogList({ scanRuns, papers, runningTaskIds, tasks, expandedRunIds, setExpandedRunIds, runAnalyzeState }) {
+  const sortedRuns = [...scanRuns].sort((a, b) => {
+    const ta = new Date(a.createdAt || 0).getTime();
+    const tb = new Date(b.createdAt || 0).getTime();
+    return tb - ta;
+  });
+
+  function toggle(id) {
+    setExpandedRunIds((current) => ({ ...current, [id]: !current[id] }));
+  }
+
+  return (
+    <div className="paper-inspector">
+      <div className="paper-heading">
+        <span>执行日志</span>
+        <h2>任务执行日志</h2>
+        <p>按时间倒序显示所有任务执行记录，点击展开查看检索式、来源状态、去重与采集文献详情。</p>
+      </div>
+      <div className="run-list">
+        {sortedRuns.length ? (
+          sortedRuns.map((run) => {
+            const status = runStatusLabel(run, runningTaskIds, tasks);
+            const expanded = expandedRunIds[run.id];
+            const savedPapers = (run.savedPaperIds || [])
+              .map((id) => papers.find((p) => p.id === id))
+              .filter(Boolean);
+            const analyzeState = runAnalyzeState[run.id];
+            return (
+              <div className={`run-item ${expanded ? "open" : ""}`} key={run.id}>
+                <div className="run-summary" onClick={() => toggle(run.id)}>
+                  <span className={`run-status-tag ${status.key}`}>{status.text}</span>
+                  <div className="run-summary-main">
+                    <div className="run-query">{run.query}</div>
+                    <div className="run-stat">
+                      {formatRunTime(run.createdAt)}
+                      {run.savedCount !== undefined
+                        ? ` · 保存 ${run.savedCount} · 去重 ${run.duplicateCount || 0} · 候选 ${run.candidateCount || 0}`
+                        : ""}
+                    </div>
+                  </div>
+                  <div className="run-caret">
+                    {expanded ? <CaretDown size={16} /> : <CaretRight size={16} />}
+                  </div>
+                </div>
+                {expanded ? (
+                  <div className="run-detail">
+                    {run._failed ? (
+                      <div className="run-detail-section">
+                        <p className="run-detail-label">失败原因</p>
+                        <p className="run-detail-line error">{run._errorMessage || "未知错误"}</p>
+                      </div>
+                    ) : null}
+                    {run.exhaustedReason && !run.targetMet ? (
+                      <div className="run-detail-section">
+                        <p className="run-detail-label">未拿满目标</p>
+                        <p className="run-detail-line warn">{run.exhaustedReason}</p>
+                      </div>
+                    ) : null}
+                    {run.queryPlan?.length ? (
+                      <div className="run-detail-section">
+                        <p className="run-detail-label">检索式（{run.queryPlan.length}）</p>
+                        {run.queryPlan.map((item, index) => (
+                          <p className="run-detail-line" key={index}>
+                            {index + 1}. [{item.source}] {item.query}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
+                    {run.sourceStatuses?.length ? (
+                      <div className="run-detail-section">
+                        <p className="run-detail-label">数据源检索状态</p>
+                        {run.sourceStatuses.map((item, index) => (
+                          <p
+                            className={`run-detail-line ${item.status === "failed" ? "error" : ""}`}
+                            key={index}
+                          >
+                            {item.source} / {item.query || run.query}：{item.status === "succeeded" ? `成功，拉取 ${item.count} 条` : `失败 — ${item.error}`}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
+                    {run.duplicateTitles?.length ? (
+                      <div className="run-detail-section">
+                        <p className="run-detail-label">去重文献（{run.duplicateCount || run.duplicateTitles.length}）</p>
+                        {run.duplicateTitles.slice(0, 8).map((title, index) => (
+                          <p className="run-detail-line" key={index}>· {title}</p>
+                        ))}
+                      </div>
+                    ) : null}
+                    {savedPapers.length ? (
+                      <div className="run-detail-section">
+                        <p className="run-detail-label">
+                          采集入库文献（{savedPapers.length}）
+                          {analyzeState ? (
+                            <span className="run-analyze-badge" style={{ marginLeft: 8 }}>
+                              AI 分析 {analyzeState.done}/{analyzeState.total}
+                            </span>
+                          ) : null}
+                        </p>
+                        <ul className="run-detail-papers">
+                          {savedPapers.map((paper) => (
+                            <li key={paper.id}>
+                              <FileText size={13} />
+                              <strong>{paper.title}</strong>
+                              <small>{paper.year || ""}</small>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })
+        ) : (
+          <div className="empty-state">暂无执行记录，执行任务后会在这里显示日志。</div>
+        )}
+      </div>
+    </div>
   );
 }
 

@@ -13,6 +13,7 @@ const papersDir = path.join(dataDir, "papers");
 const downloadsDir = path.join(dataDir, "downloads");
 const reportsDir = path.join(dataDir, "reports");
 const libraryFile = path.join(dataDir, "library.json");
+const tasksFile = path.join(dataDir, "tasks.json");
 const port = Number(process.env.LITERATURE_READER_PORT || 4177);
 
 const defaultLibrary = {
@@ -20,6 +21,8 @@ const defaultLibrary = {
   scanRuns: [],
   reports: [],
 };
+
+const defaultTasks = { tasks: [] };
 
 const maxAiConcurrency = Number(process.env.LITERATURE_READER_AI_CONCURRENCY || 3);
 let activeAiJobs = 0;
@@ -90,6 +93,20 @@ async function readLibrary() {
 async function saveLibrary(library) {
   await ensureDataDirs();
   await writeFile(libraryFile, JSON.stringify(library, null, 2), "utf8");
+}
+
+async function readTasks() {
+  await ensureDataDirs();
+  try {
+    return { ...defaultTasks, ...JSON.parse(await readFile(tasksFile, "utf8")) };
+  } catch {
+    return { ...defaultTasks };
+  }
+}
+
+async function saveTasks(tasks) {
+  await ensureDataDirs();
+  await writeFile(tasksFile, JSON.stringify(tasks, null, 2), "utf8");
 }
 
 async function removeLocalAsset(localPath) {
@@ -775,7 +792,8 @@ async function savePaperAsset(paper, downloadOpenPdf) {
 }
 
 async function handleScan(request, response) {
-  const body = await readJson(request);
+  const body = request._body || await readJson(request);
+  const taskId = request._taskId || body.taskId || null;
   const query = String(body.query || "").trim();
   const count = Math.max(1, Math.min(20, Number(body.count || 5)));
   const yearFrom = body.yearFrom ? Number(body.yearFrom) : null;
@@ -839,6 +857,7 @@ async function handleScan(request, response) {
 
   const run = {
     id: `scan_${randomUUID()}`,
+    taskId,
     query,
     count,
     yearFrom,
@@ -851,6 +870,7 @@ async function handleScan(request, response) {
     uniqueCount: unique.length,
     duplicateCount: duplicates.length,
     duplicateTitles: duplicates.slice(0, 12).map((item) => item.title),
+    savedPaperIds: saved.map((p) => p.id),
     savedCount: saved.length,
     targetMet: saved.length >= count,
     exhaustedReason:
@@ -1071,6 +1091,83 @@ async function handleAnalyze(request, response) {
   }
 }
 
+async function handleListTasks(response) {
+  const tasks = await readTasks();
+  sendJson(response, 200, tasks);
+}
+
+async function handleCreateTask(request, response) {
+  const body = await readJson(request);
+  const query = String(body.query || "").trim();
+  if (!query) return sendJson(response, 400, { error: "QUERY_REQUIRED" });
+  const now = new Date().toISOString();
+  const task = {
+    id: `task_${randomUUID()}`,
+    query,
+    count: Math.max(1, Math.min(20, Number(body.count || 5))),
+    yearFrom: body.yearFrom ? Number(body.yearFrom) : null,
+    minScore: body.minScore ? Number(body.minScore) : 0,
+    sources: Array.isArray(body.sources) && body.sources.length ? body.sources : ["openalex", "crossref"],
+    downloadOpenPdf: body.downloadOpenPdf !== false,
+    autoAnalyze: Boolean(body.autoAnalyze),
+    createdAt: now,
+    updatedAt: now,
+  };
+  const tasks = await readTasks();
+  tasks.tasks.push(task);
+  await saveTasks(tasks);
+  sendJson(response, 201, task);
+}
+
+async function handleUpdateTask(id, request, response) {
+  const body = await readJson(request);
+  const tasks = await readTasks();
+  const index = tasks.tasks.findIndex((t) => t.id === id);
+  if (index < 0) return sendJson(response, 404, { error: "TASK_NOT_FOUND" });
+  const query = String(body.query || "").trim();
+  if (!query) return sendJson(response, 400, { error: "QUERY_REQUIRED" });
+  tasks.tasks[index] = {
+    ...tasks.tasks[index],
+    query,
+    count: body.count !== undefined ? Math.max(1, Math.min(20, Number(body.count))) : tasks.tasks[index].count,
+    yearFrom: body.yearFrom !== undefined ? (body.yearFrom ? Number(body.yearFrom) : null) : tasks.tasks[index].yearFrom,
+    minScore: body.minScore !== undefined ? (body.minScore ? Number(body.minScore) : 0) : tasks.tasks[index].minScore,
+    sources: Array.isArray(body.sources) && body.sources.length ? body.sources : tasks.tasks[index].sources,
+    downloadOpenPdf: body.downloadOpenPdf !== undefined ? body.downloadOpenPdf !== false : tasks.tasks[index].downloadOpenPdf,
+    autoAnalyze: body.autoAnalyze !== undefined ? Boolean(body.autoAnalyze) : tasks.tasks[index].autoAnalyze,
+    updatedAt: new Date().toISOString(),
+  };
+  await saveTasks(tasks);
+  sendJson(response, 200, tasks.tasks[index]);
+}
+
+async function handleDeleteTask(id, response) {
+  const tasks = await readTasks();
+  const index = tasks.tasks.findIndex((t) => t.id === id);
+  if (index < 0) return sendJson(response, 404, { error: "TASK_NOT_FOUND" });
+  tasks.tasks.splice(index, 1);
+  await saveTasks(tasks);
+  sendJson(response, 200, { deleted: id });
+}
+
+async function handleRunTask(id, request, response) {
+  const tasks = await readTasks();
+  const task = tasks.tasks.find((t) => t.id === id);
+  if (!task) return sendJson(response, 404, { error: "TASK_NOT_FOUND" });
+  const body = await readJson(request);
+  const merged = {
+    ...task,
+    ...(body.sources ? { sources: body.sources } : {}),
+    ...(body.yearFrom !== undefined ? { yearFrom: body.yearFrom } : {}),
+    ...(body.minScore !== undefined ? { minScore: body.minScore } : {}),
+  };
+  handleScan({
+    ...request,
+    _taskId: task.id,
+    _body: merged,
+  }, response);
+}
+
 async function handleDeletePaper(id, response) {
   const library = await readLibrary();
   const paper = library.papers.find((item) => item.id === id);
@@ -1208,6 +1305,22 @@ async function route(request, response) {
     }
     if (url.pathname === "/api/analyze" && request.method === "POST") {
       return await handleAnalyze(request, response);
+    }
+    if (url.pathname === "/api/tasks" && request.method === "GET") {
+      return await handleListTasks(response);
+    }
+    if (url.pathname === "/api/tasks" && request.method === "POST") {
+      return await handleCreateTask(request, response);
+    }
+    if (url.pathname.startsWith("/api/tasks/") && request.method === "PUT") {
+      return await handleUpdateTask(decodeURIComponent(url.pathname.split("/").pop()), request, response);
+    }
+    if (url.pathname.startsWith("/api/tasks/") && url.pathname.endsWith("/run") && request.method === "POST") {
+      const id = decodeURIComponent(url.pathname.split("/").at(-2));
+      return await handleRunTask(id, request, response);
+    }
+    if (url.pathname.startsWith("/api/tasks/") && request.method === "DELETE") {
+      return await handleDeleteTask(decodeURIComponent(url.pathname.split("/").pop()), response);
     }
     if (url.pathname.startsWith("/api/reports/") && request.method === "GET") {
       const id = url.pathname.split("/").pop();
