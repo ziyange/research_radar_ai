@@ -155,6 +155,25 @@ function stablePaperId(paper) {
   return `paper_${createHash("sha1").update(key).digest("hex").slice(0, 14)}`;
 }
 
+function normalizeDoi(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^https?:\/\/(dx\.)?doi\.org\//i, "")
+    .replace(/^doi:\s*/i, "")
+    .trim()
+    || null;
+}
+
+function doiUrl(value) {
+  const doi = normalizeDoi(value);
+  return doi ? `https://doi.org/${doi}` : "";
+}
+
+function isLikelyPdfUrl(value) {
+  const url = String(value || "").toLowerCase();
+  return Boolean(url) && !url.includes("doi.org/") && (url.includes(".pdf") || url.includes("/pdf") || url.includes("pdfdownload") || url.includes("pdfft"));
+}
+
 function abstractFromOpenAlex(value) {
   if (!value) return "";
   const words = [];
@@ -184,18 +203,18 @@ function normalizeOpenAlex(work) {
   const best = work.best_oa_location || {};
   const source = primary.source || {};
   const openAccess = work.open_access || {};
-  const doi = work.doi ? work.doi.replace(/^https:\/\/doi.org\//i, "") : null;
+  const doi = normalizeDoi(work.doi);
   const locations = (work.locations || []).slice(0, 10);
   const pdfCandidates = uniqueStrings([
     primary.pdf_url,
     best.pdf_url,
-    openAccess.oa_url,
     ...locations.map((item) => item.pdf_url),
-  ]);
+  ].filter(isLikelyPdfUrl));
   const landingCandidates = uniqueStrings([
     primary.landing_page_url,
     best.landing_page_url,
-    work.doi,
+    openAccess.oa_url,
+    doiUrl(doi),
     work.id,
     ...locations.map((item) => item.landing_page_url),
   ]);
@@ -213,7 +232,7 @@ function normalizeOpenAlex(work) {
     keywords: (work.concepts || []).slice(0, 10).map((item) => item.display_name).filter(Boolean),
     source: "OpenAlex",
     sourceUrl: work.id,
-    landingPageUrl: landingCandidates[0] || work.doi || work.id,
+    landingPageUrl: landingCandidates[0] || doiUrl(doi) || work.id,
     pdfUrl: pdfCandidates[0] || null,
     pdfCandidates,
     landingCandidates,
@@ -233,10 +252,11 @@ function normalizeCrossref(item) {
       .filter((link) => String(link["content-type"] || "").includes("pdf") || String(link.URL || "").toLowerCase().includes(".pdf"))
       .map((link) => link.URL),
   );
+  const doi = normalizeDoi(item.DOI);
   const paper = {
     id: "",
     title,
-    doi: item.DOI || null,
+    doi,
     year: parseYear(item.issued?.["date-parts"], item["published-print"], item["published-online"]),
     journal: item["container-title"]?.[0] || "Crossref",
     authors: (item.author || [])
@@ -246,11 +266,11 @@ function normalizeCrossref(item) {
     abstract: stripHtml(item.abstract || ""),
     keywords: item.subject || [],
     source: "Crossref",
-    sourceUrl: item.URL || (item.DOI ? `https://doi.org/${item.DOI}` : ""),
-    landingPageUrl: item.URL || (item.DOI ? `https://doi.org/${item.DOI}` : ""),
+    sourceUrl: item.URL || doiUrl(doi),
+    landingPageUrl: item.URL || doiUrl(doi),
     pdfUrl: pdfCandidates[0] || null,
     pdfCandidates,
-    landingCandidates: uniqueStrings([item.URL, item.DOI ? `https://doi.org/${item.DOI}` : ""]),
+    landingCandidates: uniqueStrings([item.URL, doiUrl(doi)]),
     openAccess: Boolean(pdfCandidates.length),
     citedByCount: item["is-referenced-by-count"] || 0,
     rawScore: 0,
@@ -474,6 +494,7 @@ function dedupePapers(existing, candidates) {
 }
 
 function paperMarkdown(paper) {
+  const link = paper.landingPageUrl || paper.sourceUrl || doiUrl(paper.doi);
   return [
     `# ${paper.title}`,
     "",
@@ -482,7 +503,7 @@ function paperMarkdown(paper) {
     `- 期刊: ${paper.journal || "未知"}`,
     `- 来源: ${paper.source}`,
     `- 开放获取: ${paper.openAccess ? "是" : "否"}`,
-    `- DOI/来源链接: ${paper.landingPageUrl || paper.sourceUrl || "无"}`,
+    `- DOI/来源链接: ${link || "无"}`,
     `- 本地 PDF: ${paper.localPdfPath || "未下载"}`,
     "",
     "## Authors",
@@ -514,29 +535,143 @@ function decodeEntities(value) {
     .replace(/&#39;/g, "'");
 }
 
-function extractReadableHtml(html) {
+function cleanInlineText(value) {
+  return decodeEntities(
+    String(value || "")
+      .replace(/<sup[\s\S]*?<\/sup>/gi, (match) => ` ${stripHtml(match)} `)
+      .replace(/<sub[\s\S]*?<\/sub>/gi, (match) => stripHtml(match))
+      .replace(/<[^>]+>/g, " ")
+      .replace(/[ \t\r\f\v]+/g, " ")
+      .replace(/\n\s+/g, "\n")
+      .trim(),
+  );
+}
+
+function markdownTableFromHtml(tableHtml) {
+  if (/class=["'][^"']*\bdisp-formula\b/i.test(tableHtml)) {
+    const formula = cleanInlineText(tableHtml.match(/<td[^>]+class=["'][^"']*\bformula\b[^"']*>\s*([\s\S]*?)<\/td>/i)?.[1] || "");
+    const label = cleanInlineText(tableHtml.match(/<td[^>]+class=["'][^"']*\blabel\b[^"']*>\s*([\s\S]*?)<\/td>/i)?.[1] || "");
+    return formula ? `> 公式${label ? ` ${label}` : ""}: ${formula}` : "";
+  }
+  const caption = cleanInlineText(tableHtml.match(/<caption[\s\S]*?<\/caption>/i)?.[0] || "");
+  const rows = [...String(tableHtml || "").matchAll(/<tr[\s\S]*?<\/tr>/gi)]
+    .map((rowMatch) =>
+      [...rowMatch[0].matchAll(/<(th|td)[^>]*>([\s\S]*?)<\/\1>/gi)].map((cell) =>
+        cleanInlineText(cell[2]).replace(/\|/g, "\\|"),
+      ),
+    )
+    .filter((row) => row.length);
+  if (!rows.length) return "";
+  const width = Math.max(...rows.map((row) => row.length));
+  const normalized = rows.map((row) => [...row, ...Array(Math.max(0, width - row.length)).fill("")]);
+  const header = normalized[0];
+  const body = normalized.slice(1);
+  return [
+    caption ? `**${caption}**` : "",
+    `| ${header.join(" | ")} |`,
+    `| ${header.map(() => "---").join(" | ")} |`,
+    ...body.map((row) => `| ${row.join(" | ")} |`),
+  ].filter(Boolean).join("\n");
+}
+
+function selectArticleContentHtml(html) {
+  const source = String(html || "");
+  const bodyMatch = source.match(/<section[^>]+class=["'][^"']*\bbody\b[^"']*\bmain-article-body\b[^"']*["'][^>]*>/i);
+  if (bodyMatch?.index !== undefined) {
+    const start = bodyMatch.index;
+    const endMarkers = [
+      source.indexOf('<section id="_ad', start),
+      source.indexOf('<section class="associated-data', start),
+      source.indexOf('<div class="actions', start),
+      source.indexOf("</article>", start),
+    ].filter((index) => index > start);
+    const end = endMarkers.length ? Math.min(...endMarkers) : source.length;
+    return source.slice(start, end);
+  }
+  const article = source.match(/<article[\s\S]*?<\/article>/i);
+  if (article) return article[0];
+  const main = source.match(/<main[\s\S]*?<\/main>/i);
+  return main ? main[0] : source;
+}
+
+function figureMarkdownFromHtml(figureHtml, baseUrl) {
+  const label = cleanInlineText(
+    figureHtml.match(/<h[1-6][^>]+class=["'][^"']*\bobj_head\b[^"']*["'][^>]*>([\s\S]*?)<\/h[1-6]>/i)?.[1] ||
+      figureHtml.match(/title=["']([^"']+)["']/i)?.[1] ||
+      "",
+  );
+  const imgMatch = figureHtml.match(/<img[^>]+>/i)?.[0] || "";
+  const src = absoluteUrl(imgMatch.match(/\ssrc=["']([^"']+)["']/i)?.[1] || "", baseUrl);
+  const alt = cleanInlineText(imgMatch.match(/\salt=["']([^"']*)["']/i)?.[1] || label || "figure");
+  const caption = cleanInlineText(
+    figureHtml.match(/<figcaption[\s\S]*?<\/figcaption>/i)?.[0] ||
+      figureHtml.match(/<div[^>]+class=["'][^"']*\bcaption\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[0] ||
+      "",
+  );
+  return [
+    label ? `**${label}**` : "",
+    src ? `![${alt}](${src})` : "",
+    caption ? `> 图表说明：${caption}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function htmlToStructuredMarkdown(html, baseUrl) {
   const withoutNoise = String(html || "")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
     .replace(/<header[\s\S]*?<\/header>/gi, " ")
-    .replace(/<footer[\s\S]*?<\/footer>/gi, " ");
-  const candidates = [
-    ...withoutNoise.matchAll(/<article[\s\S]*?<\/article>/gi),
-    ...withoutNoise.matchAll(/<main[\s\S]*?<\/main>/gi),
-    ...withoutNoise.matchAll(/<section[^>]+(?:article|content|main|body)[^>]*>[\s\S]*?<\/section>/gi),
-  ].map((match) => match[0]);
-  const source = candidates.sort((a, b) => b.length - a.length)[0] || withoutNoise;
-  return decodeEntities(
+    .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+    .replace(/<aside[\s\S]*?<\/aside>/gi, " ")
+    .replace(/<button[\s\S]*?<\/button>/gi, " ");
+  let source = selectArticleContentHtml(withoutNoise);
+  const figureBlocks = [];
+  source = source.replace(/<figure[\s\S]*?<\/figure>/gi, (match) => {
+    const markdown = figureMarkdownFromHtml(match, baseUrl);
+    if (!markdown) return " ";
+    const token = `\n\n@@RR_FIGURE_${figureBlocks.length}@@\n\n`;
+    figureBlocks.push(markdown);
+    return token;
+  });
+  const tableBlocks = [];
+  source = source.replace(/<table[\s\S]*?<\/table>/gi, (match) => {
+    const markdown = markdownTableFromHtml(match);
+    if (!markdown) return " ";
+    const token = `\n\n@@RR_TABLE_${tableBlocks.length}@@\n\n`;
+    tableBlocks.push(markdown);
+    return token;
+  });
+
+  source = source
+    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_, text) => `\n\n# ${cleanInlineText(text)}\n\n`)
+    .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_, text) => `\n\n## ${cleanInlineText(text)}\n\n`)
+    .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (_, text) => `\n\n### ${cleanInlineText(text)}\n\n`)
+    .replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, (_, text) => `\n\n#### ${cleanInlineText(text)}\n\n`)
+    .replace(/<h5[^>]*>([\s\S]*?)<\/h5>/gi, (_, text) => `\n\n##### ${cleanInlineText(text)}\n\n`)
+    .replace(/<h6[^>]*>([\s\S]*?)<\/h6>/gi, (_, text) => `\n\n###### ${cleanInlineText(text)}\n\n`)
+    .replace(/<figcaption[^>]*>([\s\S]*?)<\/figcaption>/gi, (_, text) => `\n\n> 图表说明：${cleanInlineText(text)}\n\n`)
+    .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_, text) => `\n- ${cleanInlineText(text)}\n`)
+    .replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, (_, text) => `\n\n${cleanInlineText(text)}\n\n`)
+    .replace(/<br\s*\/?>/gi, "\n");
+
+  let markdown = decodeEntities(
     source
-      .replace(/<\/(p|h1|h2|h3|h4|li|div|section)>/gi, "\n")
-      .replace(/<br\s*\/?>/gi, "\n")
       .replace(/<[^>]+>/g, " ")
       .replace(/[ \t]+/g, " ")
       .replace(/\n\s+/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim(),
   );
+  markdown = markdown.replace(/@@RR_FIGURE_(\d+)@@/g, (_, index) => figureBlocks[Number(index)] || "");
+  markdown = markdown.replace(/@@RR_TABLE_(\d+)@@/g, (_, index) => tableBlocks[Number(index)] || "");
+  markdown = markdown
+    .replace(new RegExp(`\\(${baseUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "g"), "")
+    .split(/\r?\n/)
+    .filter((line) => !/^(Open in a new tab|Find articles by|Author information|Article notes|Copyright and License information|PMC Copyright notice)$/i.test(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return markdown;
 }
 
 function isBlockedOrErrorPage(html) {
@@ -576,6 +711,18 @@ function discoverRedirectUrls(html, baseUrl) {
   return uniqueStrings(urls);
 }
 
+function discoverPdfUrls(html, baseUrl) {
+  const urls = [];
+  const source = String(html || "");
+  for (const match of source.matchAll(/href=["']([^"']*pdf[^"']*)["']/gi)) {
+    urls.push(absoluteUrl(match[1], baseUrl));
+  }
+  for (const match of source.matchAll(/name=["']citation_pdf_url["'][^>]+content=["']([^"']+)["']/gi)) {
+    urls.push(absoluteUrl(match[1], baseUrl));
+  }
+  return uniqueStrings(urls).filter(isLikelyPdfUrl);
+}
+
 function fullTextMarkdown(paper, text, url) {
   return [
     `# ${paper.title}`,
@@ -584,13 +731,65 @@ function fullTextMarkdown(paper, text, url) {
     `- 年份: ${paper.year || "未知"}`,
     `- 期刊: ${paper.journal || "未知"}`,
     `- 正文来源: ${url}`,
-    `- 获取方式: 公开网页正文抽取`,
+    `- 获取方式: 公开网页正文抽取 + 结构化 Markdown 转换`,
     "",
     "## Full Text",
     "",
     text,
     "",
   ].join("\n");
+}
+
+async function polishFullTextMarkdownLayout(markdown, paper) {
+  if (!aiConfigured().configured || process.env.LITERATURE_READER_AI_POLISH_FULLTEXT === "false") return markdown;
+  try {
+    const chunks = splitMarkdownForAiPolish(markdown);
+    const polished = [];
+    for (const chunk of chunks) {
+      const payload = await postOpenAiCompatibleJson({
+        model: process.env.OPENAI_MODEL,
+        temperature: 0,
+        enable_thinking: false,
+        max_tokens: 9000,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是论文 HTML 转 Markdown 的版式清理器。只能整理标题层级、段落换行、列表、表格和图表说明。禁止总结、改写科研结论、删除正文事实、添加新内容。只输出清理后的 Markdown。",
+          },
+          {
+            role: "user",
+            content: `论文题名：${paper.title}\n\n下面是全文 Markdown 的一个连续分块。请只清理版式，保留原始内容、数据、公式、表格和引用编号：\n\n${chunk}`,
+          },
+        ],
+      });
+      const content = payload.choices?.[0]?.message?.content?.trim();
+      polished.push(content && content.length > chunk.length * 0.55 ? content : chunk);
+    }
+    const result = polished.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+    return result.length > markdown.length * 0.65 ? result : markdown;
+  } catch {
+    return markdown;
+  }
+}
+
+function splitMarkdownForAiPolish(markdown) {
+  const chunks = [];
+  let current = "";
+  for (const line of String(markdown || "").split(/\r?\n/)) {
+    const next = current ? `${current}\n${line}` : line;
+    if (/^#{1,3}\s+/.test(line) && current.length > 5000) {
+      chunks.push(current.trim());
+      current = line;
+    } else if (next.length > 11000) {
+      chunks.push(current.trim());
+      current = line;
+    } else {
+      current = next;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
 }
 
 function publicFileUrl(localPath) {
@@ -601,7 +800,7 @@ function serializeLibrary(library) {
   return {
     ...library,
     papers: (library.papers || []).map((paper) => ({
-      ...paper,
+      ...normalizeStoredPaper(paper),
       localMarkdownUrl: publicFileUrl(paper.localMarkdownPath),
       localPdfUrl: publicFileUrl(paper.localPdfPath),
       localFullTextUrl: publicFileUrl(paper.localFullTextPath),
@@ -613,27 +812,55 @@ function serializeLibrary(library) {
   };
 }
 
+function normalizeStoredPaper(paper) {
+  const doi = normalizeDoi(paper.doi);
+  const pdfCandidates = uniqueStrings([paper.pdfUrl, ...(paper.pdfCandidates || [])].filter(isLikelyPdfUrl));
+  const landingCandidates = uniqueStrings([
+    paper.landingPageUrl,
+    paper.sourceUrl,
+    doiUrl(doi),
+    ...(paper.landingCandidates || []),
+    paper.pdfUrl && !isLikelyPdfUrl(paper.pdfUrl) ? paper.pdfUrl : "",
+  ]);
+  return {
+    ...paper,
+    doi,
+    pdfUrl: pdfCandidates[0] || null,
+    pdfCandidates,
+    landingPageUrl: landingCandidates[0] || doiUrl(doi) || paper.landingPageUrl || paper.sourceUrl || "",
+    landingCandidates,
+  };
+}
+
 async function downloadPdf(paper) {
   if (!paper.pdfUrl) return null;
   return downloadPdfFromUrl(paper, paper.pdfUrl);
 }
 
-async function downloadPdfFromUrl(paper, pdfUrl) {
+async function downloadPdfFromUrl(paper, pdfUrl, attempts = []) {
   if (!pdfUrl) return null;
   try {
     const response = await fetch(pdfUrl, {
       redirect: "follow",
       headers: { "User-Agent": "ResearchRadarAI-LiteratureReader/0.1" },
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      attempts.push({ type: "pdf", url: pdfUrl, status: response.status, ok: false, reason: "HTTP_ERROR" });
+      return null;
+    }
     const buffer = Buffer.from(await response.arrayBuffer());
     const isPdf = buffer.subarray(0, 4).toString("utf8") === "%PDF";
-    if (!isPdf) return null;
+    if (!isPdf) {
+      attempts.push({ type: "pdf", url: pdfUrl, status: response.status, ok: false, reason: "NOT_PDF" });
+      return null;
+    }
     const fileName = `${paper.id}.pdf`;
     const target = path.join(downloadsDir, fileName);
     await writeFile(target, buffer);
+    attempts.push({ type: "pdf", url: pdfUrl, status: response.status, ok: true, bytes: buffer.length });
     return path.relative(__dirname, target).replace(/\\/g, "/");
   } catch {
+    attempts.push({ type: "pdf", url: pdfUrl, ok: false, reason: "FETCH_FAILED" });
     return null;
   }
 }
@@ -653,6 +880,20 @@ async function fetchCrossrefWorkByDoi(doi) {
   }
 }
 
+async function fetchOpenAlexWorkByDoi(doi) {
+  const url = doiUrl(doi);
+  if (!url) return {};
+  try {
+    const response = await fetch(`https://api.openalex.org/works/${url}`, {
+      headers: { "User-Agent": "ResearchRadarAI-LiteratureReader/0.1" },
+    });
+    if (!response.ok) return {};
+    return normalizeOpenAlex(await response.json());
+  } catch {
+    return {};
+  }
+}
+
 async function fetchUnpaywallByDoi(doi) {
   const email = process.env.UNPAYWALL_EMAIL;
   if (!doi || !email) return {};
@@ -661,8 +902,12 @@ async function fetchUnpaywallByDoi(doi) {
     if (!response.ok) return {};
     const item = await response.json();
     const locations = [item.best_oa_location, ...(item.oa_locations || [])].filter(Boolean);
-    const pdfCandidates = uniqueStrings(locations.map((location) => location.url_for_pdf));
-    const landingCandidates = uniqueStrings(locations.map((location) => location.url).concat(item.doi_url));
+    const pdfCandidates = uniqueStrings(locations.map((location) => location.url_for_pdf).filter(isLikelyPdfUrl));
+    const landingCandidates = uniqueStrings(
+      locations
+        .flatMap((location) => [location.url, isLikelyPdfUrl(location.url_for_pdf) ? "" : location.url_for_pdf])
+        .concat(item.doi_url, doiUrl(item.doi)),
+    );
     return {
       pdfCandidates,
       landingCandidates,
@@ -680,17 +925,23 @@ function mergePaperLinks(paper, ...sources) {
     paper.pdfUrl,
     ...(paper.pdfCandidates || []),
     ...sources.flatMap((source) => [source.pdfUrl, ...(source.pdfCandidates || [])]),
-  ]);
+  ].filter(isLikelyPdfUrl));
   const landingCandidates = uniqueStrings([
     paper.landingPageUrl,
     paper.sourceUrl,
-    paper.doi ? `https://doi.org/${paper.doi}` : "",
+    doiUrl(paper.doi),
     ...(paper.landingCandidates || []),
-    ...sources.flatMap((source) => [source.landingPageUrl, source.sourceUrl, ...(source.landingCandidates || [])]),
+    ...sources.flatMap((source) => [
+      source.landingPageUrl,
+      source.sourceUrl,
+      doiUrl(source.doi),
+      ...(source.landingCandidates || []),
+      source.pdfUrl && !isLikelyPdfUrl(source.pdfUrl) ? source.pdfUrl : "",
+    ]),
   ]);
   return {
     ...paper,
-    pdfUrl: pdfCandidates[0] || paper.pdfUrl || null,
+    pdfUrl: pdfCandidates[0] || null,
     pdfCandidates,
     landingPageUrl: landingCandidates[0] || paper.landingPageUrl || paper.sourceUrl || "",
     landingCandidates,
@@ -699,25 +950,26 @@ function mergePaperLinks(paper, ...sources) {
 }
 
 async function refreshOpenAccessLinks(paper) {
-  const [crossref, unpaywall] = await Promise.all([
+  const [crossref, openalex, unpaywall] = await Promise.all([
     fetchCrossrefWorkByDoi(paper.doi),
+    fetchOpenAlexWorkByDoi(paper.doi),
     fetchUnpaywallByDoi(paper.doi),
   ]);
-  return mergePaperLinks(paper, crossref, unpaywall);
+  return mergePaperLinks(paper, crossref, openalex, unpaywall);
 }
 
-async function downloadBestAvailablePdf(paper) {
-  const candidates = uniqueStrings([paper.pdfUrl, ...(paper.pdfCandidates || [])]);
+async function downloadBestAvailablePdf(paper, attempts = []) {
+  const candidates = uniqueStrings([paper.pdfUrl, ...(paper.pdfCandidates || [])].filter(isLikelyPdfUrl));
   for (const url of candidates) {
-    const localPath = await downloadPdfFromUrl(paper, url);
+    const localPath = await downloadPdfFromUrl(paper, url, attempts);
     if (localPath) return { localPath, url };
   }
   return { localPath: null, url: "" };
 }
 
-async function fetchOpenFullText(paper) {
+async function fetchOpenFullText(paper, attempts = []) {
   const queue = uniqueStrings([
-    paper.doi ? `https://doi.org/${paper.doi}` : "",
+    doiUrl(paper.doi),
     paper.landingPageUrl,
     paper.sourceUrl,
     ...(paper.landingCandidates || []),
@@ -735,43 +987,68 @@ async function fetchOpenFullText(paper) {
           Accept: "text/html,application/xhtml+xml",
         },
       });
-      if (!response.ok) continue;
+      if (!response.ok) {
+        attempts.push({ type: "html", url, status: response.status, ok: false, reason: "HTTP_ERROR" });
+        continue;
+      }
       const contentType = response.headers.get("content-type") || "";
       if (!contentType.includes("html")) continue;
       const html = await response.text();
       for (const discovered of discoverRedirectUrls(html, url)) {
         if (!visited.has(discovered)) queue.push(discovered);
       }
-      if (isBlockedOrErrorPage(html)) continue;
-      const text = extractReadableHtml(html);
-      if (text.length < 3000) continue;
+      if (isBlockedOrErrorPage(html)) {
+        attempts.push({ type: "html", url, status: response.status, ok: false, reason: "BLOCKED_OR_ERROR_PAGE" });
+        continue;
+      }
+      for (const pdfUrl of discoverPdfUrls(html, url)) {
+        const localPdfPath = await downloadPdfFromUrl(paper, pdfUrl, attempts);
+        if (localPdfPath) return { localPdfPath, pdfUrl, localFullTextPath: null };
+      }
+      const text = await polishFullTextMarkdownLayout(htmlToStructuredMarkdown(html, url), paper);
+      if (text.length < 3000) {
+        attempts.push({ type: "html", url, status: response.status, ok: false, reason: "TOO_SHORT", chars: text.length });
+        continue;
+      }
       const target = path.join(papersDir, `${slug(paper.title || paper.id)}-${paper.id}-fulltext.md`);
       await writeFile(target, fullTextMarkdown(paper, text, url), "utf8");
-      return path.relative(__dirname, target).replace(/\\/g, "/");
+      attempts.push({ type: "html", url, status: response.status, ok: true, chars: text.length });
+      return { localFullTextPath: path.relative(__dirname, target).replace(/\\/g, "/"), localPdfPath: null, pdfUrl: "" };
     } catch {
+      attempts.push({ type: "html", url, ok: false, reason: "FETCH_FAILED" });
       // Public full text extraction is opportunistic.
     }
   }
-  return null;
+  return { localFullTextPath: null, localPdfPath: null, pdfUrl: "" };
 }
 
 async function refreshPaperReadableAssets(paper) {
+  const attempts = [];
   const linked = await refreshOpenAccessLinks(paper);
-  const pdf = await downloadBestAvailablePdf(linked);
+  const pdf = await downloadBestAvailablePdf(linked, attempts);
   if (pdf.localPath) {
     return {
       paper: { ...linked, pdfUrl: pdf.url || linked.pdfUrl, localPdfPath: pdf.localPath },
       method: "pdf",
+      retrieval: { method: "pdf", attempts },
     };
   }
-  const localFullTextPath = await fetchOpenFullText(linked);
-  if (localFullTextPath) {
+  const textOrPdf = await fetchOpenFullText(linked, attempts);
+  if (textOrPdf.localPdfPath) {
     return {
-      paper: { ...linked, localFullTextPath },
-      method: "html-fulltext",
+      paper: { ...linked, pdfUrl: textOrPdf.pdfUrl || linked.pdfUrl, localPdfPath: textOrPdf.localPdfPath },
+      method: "pdf",
+      retrieval: { method: "pdf", attempts },
     };
   }
-  return { paper: linked, method: "" };
+  if (textOrPdf.localFullTextPath) {
+    return {
+      paper: { ...linked, localFullTextPath: textOrPdf.localFullTextPath },
+      method: "html-fulltext",
+      retrieval: { method: "html-fulltext", attempts },
+    };
+  }
+  return { paper: linked, method: "", retrieval: { method: "", attempts } };
 }
 
 async function savePaperAsset(paper, downloadOpenPdf) {
@@ -781,7 +1058,12 @@ async function savePaperAsset(paper, downloadOpenPdf) {
     Object.assign(enriched, refreshed.paper);
   }
   if (!enriched.localPdfPath && paper.openAccess) {
-    enriched.localFullTextPath = await fetchOpenFullText(enriched);
+    const textOrPdf = await fetchOpenFullText(enriched);
+    if (textOrPdf.localPdfPath) {
+      enriched.localPdfPath = textOrPdf.localPdfPath;
+      enriched.pdfUrl = textOrPdf.pdfUrl || enriched.pdfUrl;
+    }
+    if (textOrPdf.localFullTextPath) enriched.localFullTextPath = textOrPdf.localFullTextPath;
   }
   const markdownName = `${slug(enriched.title || enriched.id)}-${enriched.id}.md`;
   const markdownPath = path.join(papersDir, markdownName);
@@ -1207,6 +1489,7 @@ async function handleFetchFullText(id, response) {
     return sendJson(response, 404, {
       error: "FULL_TEXT_NOT_AVAILABLE",
       message: "已访问 DOI/来源页，但未发现可合法下载的 PDF 或足够长度的公开正文",
+      retrieval: refreshed.retrieval,
     });
   }
   library.papers[index] = refreshed.paper;
@@ -1216,6 +1499,7 @@ async function handleFetchFullText(id, response) {
     library: serializeLibrary(library),
     reused: false,
     method: refreshed.method,
+    retrieval: refreshed.retrieval,
   });
 }
 

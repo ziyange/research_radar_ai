@@ -109,7 +109,11 @@ const api = {
   async fetchFullText(id) {
     const response = await fetch(`/api/papers/${encodeURIComponent(id)}/fetch-fulltext`, { method: "POST" });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.message || data.error || "获取全文失败");
+    if (!response.ok) {
+      const error = new Error(data.message || data.error || "获取全文失败");
+      error.retrieval = data.retrieval;
+      throw error;
+    }
     return data;
   },
 };
@@ -118,6 +122,14 @@ function scoreTone(score) {
   if (score >= 80) return "high";
   if (score >= 60) return "medium";
   return "low";
+}
+
+function doiUrl(value) {
+  const doi = String(value || "")
+    .trim()
+    .replace(/^https?:\/\/(dx\.)?doi\.org\//i, "")
+    .replace(/^doi:\s*/i, "");
+  return doi ? `https://doi.org/${doi}` : "";
 }
 
 function short(value, length = 120) {
@@ -256,46 +268,54 @@ function renderMarkdown(markdown) {
       flushList();
       if (!table) table = { rows: [] };
       table.rows.push(line.trim());
-    } else if (line.startsWith("# ")) {
-      flushList();
-      flushTable();
-      blocks.push(<h1 key={index}><InlineMarkdown text={line.slice(2)} /></h1>);
-    } else if (line.startsWith("## ")) {
-      flushList();
-      flushTable();
-      blocks.push(<h2 key={index}><InlineMarkdown text={line.slice(3)} /></h2>);
-    } else if (line.startsWith("### ")) {
-      flushList();
-      flushTable();
-      blocks.push(<h3 key={index}><InlineMarkdown text={line.slice(4)} /></h3>);
-    } else if (line.startsWith("#### ")) {
-      flushList();
-      flushTable();
-      blocks.push(<h4 key={index}><InlineMarkdown text={line.slice(5)} /></h4>);
-    } else if (line.startsWith("- ")) {
-      if (!list || list.type !== "ul") {
-        flushList();
-        list = { type: "ul", items: [] };
-      }
-      list.items.push(line.slice(2));
-    } else if (/^\d+\.\s/.test(line)) {
-      if (!list || list.type !== "ol") {
-        flushList();
-        list = { type: "ol", items: [] };
-      }
-      list.items.push(line.replace(/^\d+\.\s/, ""));
-    } else if (line.startsWith("> ")) {
-      flushList();
-      flushTable();
-      blocks.push(<blockquote key={index}><InlineMarkdown text={line.slice(2)} /></blockquote>);
-    } else if (!line.trim()) {
-      flushList();
-      flushTable();
-      blocks.push(<div className="md-gap" key={index} />);
     } else {
-      flushList();
-      flushTable();
-      blocks.push(<p key={index}><InlineMarkdown text={line} /></p>);
+      const image = line.trim().match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+      if (image) {
+        flushList();
+        flushTable();
+        blocks.push(<img className="markdown-image" key={index} src={image[2]} alt={image[1]} />);
+      } else if (line.startsWith("# ")) {
+        flushList();
+        flushTable();
+        blocks.push(<h1 key={index}><InlineMarkdown text={line.slice(2)} /></h1>);
+      } else if (line.startsWith("## ")) {
+        flushList();
+        flushTable();
+        blocks.push(<h2 key={index}><InlineMarkdown text={line.slice(3)} /></h2>);
+      } else if (line.startsWith("### ")) {
+        flushList();
+        flushTable();
+        blocks.push(<h3 key={index}><InlineMarkdown text={line.slice(4)} /></h3>);
+      } else if (line.startsWith("#### ")) {
+        flushList();
+        flushTable();
+        blocks.push(<h4 key={index}><InlineMarkdown text={line.slice(5)} /></h4>);
+      } else if (line.startsWith("- ")) {
+        if (!list || list.type !== "ul") {
+          flushList();
+          list = { type: "ul", items: [] };
+        }
+        list.items.push(line.slice(2));
+      } else if (/^\d+\.\s/.test(line)) {
+        if (!list || list.type !== "ol") {
+          flushList();
+          list = { type: "ol", items: [] };
+        }
+        list.items.push(line.replace(/^\d+\.\s/, ""));
+      } else if (line.startsWith("> ")) {
+        flushList();
+        flushTable();
+        blocks.push(<blockquote key={index}><InlineMarkdown text={line.slice(2)} /></blockquote>);
+      } else if (!line.trim()) {
+        flushList();
+        flushTable();
+        blocks.push(<div className="md-gap" key={index} />);
+      } else {
+        flushList();
+        flushTable();
+        blocks.push(<p key={index}><InlineMarkdown text={line} /></p>);
+      }
+      return;
     }
   });
   flushList();
@@ -320,6 +340,7 @@ export function App() {
   const [runningTaskIds, setRunningTaskIds] = useState({});
   const [analyzingPaperIds, setAnalyzingPaperIds] = useState({});
   const [fetchingFullTextIds, setFetchingFullTextIds] = useState({});
+  const [retrievalStatus, setRetrievalStatus] = useState(null);
   const [error, setError] = useState("");
   const [taskModal, setTaskModal] = useState(null);
   const [expandedRunIds, setExpandedRunIds] = useState({});
@@ -582,10 +603,22 @@ export function App() {
     try {
       const data = await api.fetchFullText(paper.id);
       setLibrary(data.library);
-      setStatus({ tone: "success", message: data.reused ? "已存在公开全文文本" : "公开全文文本已保存到本地" });
+      setRetrievalStatus(data.retrieval || { method: data.method || (data.reused ? "reused" : "") });
+      setStatus({
+        tone: "success",
+        message:
+          data.method === "pdf"
+            ? "完整 PDF 已保存到本地"
+            : data.method === "html-fulltext"
+              ? "公开 HTML 全文已保存为 Markdown"
+              : data.reused
+                ? "本地已存在完整文献资产"
+                : "文献资产已更新",
+      });
       setReadingMode("source");
     } catch (err) {
       setError(err.message);
+      setRetrievalStatus(err.retrieval || null);
       setStatus({ tone: "error", message: err.message });
     } finally {
       setFetchingFullTextIds((current) => {
@@ -918,7 +951,30 @@ export function App() {
                       : "获取 DOI 原文/PDF"}
                 </button>
               ) : null}
-              <FileLine label="DOI" path={selectedPaper.doi ? `https://doi.org/${selectedPaper.doi}` : ""} url={selectedPaper.doi ? `https://doi.org/${selectedPaper.doi}` : ""} />
+              {retrievalStatus ? (
+                <div className="retrieval-card">
+                  <strong>
+                    {retrievalStatus.method === "pdf"
+                      ? "PDF 获取成功"
+                      : retrievalStatus.method === "html-fulltext"
+                        ? "已获取 HTML 全文"
+                        : "获取记录"}
+                  </strong>
+                  <span>
+                    {retrievalStatus.method === "pdf"
+                      ? "已保存完整 PDF。"
+                      : retrievalStatus.method === "html-fulltext"
+                        ? "未直接拿到 PDF，已把公开页面正文保存为 Markdown。"
+                        : "未发现可直接保存的完整 PDF 或正文。"}
+                  </span>
+                  {(retrievalStatus.attempts || []).slice(-4).map((attempt, index) => (
+                    <small key={`${attempt.url}-${index}`}>
+                      {attempt.type}: {attempt.ok ? "成功" : attempt.reason || "失败"} · {attempt.url}
+                    </small>
+                  ))}
+                </div>
+              ) : null}
+              <FileLine label="DOI" path={doiUrl(selectedPaper.doi)} url={doiUrl(selectedPaper.doi)} />
               <FileLine label="来源页面" path={selectedPaper.landingPageUrl || selectedPaper.sourceUrl} url={selectedPaper.landingPageUrl || selectedPaper.sourceUrl} />
               <FileLine label="公开全文" path={selectedPaper.localFullTextPath} url={selectedPaper.localFullTextUrl} />
               <FileLine label="本地PDF" path={selectedPaper.localPdfPath} url={selectedPaper.localPdfUrl} onOpen={() => setReadingMode("source")} />
@@ -989,82 +1045,94 @@ function TaskModal({ mode, initial, loading, onClose, onSave }) {
           </button>
         </div>
         <div className="modal-body">
-          <label>
-            研究方向
+          <div className="modal-section">
+            <div className="modal-section-label">研究方向</div>
             <textarea
               value={form.query}
               onChange={(event) => update("query", event.target.value)}
               placeholder="例如：纳米材料 植物 胁迫 响应"
               required
             />
-          </label>
-          <div className="form-grid">
-            <label>
-              篇数
-              <input
-                type="number"
-                min="1"
-                max="20"
-                value={form.count}
-                onChange={(event) => update("count", event.target.value)}
-              />
-            </label>
-            <label>
-              起始年份
-              <input
-                type="number"
-                value={form.yearFrom || ""}
-                onChange={(event) => update("yearFrom", event.target.value)}
-              />
-            </label>
-            <label>
-              最低评分
-              <input
-                type="number"
-                min="0"
-                max="100"
-                value={form.minScore}
-                onChange={(event) => update("minScore", event.target.value)}
-              />
-            </label>
           </div>
-          <div className="source-toggles">
-            <button
-              type="button"
-              className={form.sources.includes("openalex") ? "active" : ""}
-              onClick={() => toggleSource("openalex")}
-            >
-              OpenAlex
-            </button>
-            <button
-              type="button"
-              className={form.sources.includes("crossref") ? "active" : ""}
-              onClick={() => toggleSource("crossref")}
-            >
-              Crossref
-            </button>
+          <div className="modal-section">
+            <div className="modal-section-label">采集参数</div>
+            <div className="modal-form-grid">
+              <label>
+                <span>篇数</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={form.count}
+                  onChange={(event) => update("count", event.target.value)}
+                />
+              </label>
+              <label>
+                <span>起始年份</span>
+                <input
+                  type="number"
+                  value={form.yearFrom || ""}
+                  onChange={(event) => update("yearFrom", event.target.value)}
+                />
+              </label>
+              <label>
+                <span>最低评分</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={form.minScore}
+                  onChange={(event) => update("minScore", event.target.value)}
+                />
+              </label>
+            </div>
           </div>
-          <label className="checkbox-field">
-            <input
-              type="checkbox"
-              checked={form.downloadOpenPdf}
-              onChange={(event) => update("downloadOpenPdf", event.target.checked)}
-            />
-            下载开放 PDF
-          </label>
-          <label className="checkbox-field">
-            <input
-              type="checkbox"
-              checked={form.autoAnalyze}
-              onChange={(event) => update("autoAnalyze", event.target.checked)}
-            />
-            <span>
-              AI 分析
-              <small style={{ display: "block", fontWeight: 500, color: "#7a8581" }}>
-                采集入库后自动逐篇调用 AI 分析
-              </small>
-            </span>
-          </label>
+          <div className="modal-section">
+            <div className="modal-section-label">数据源</div>
+            <div className="modal-pill-row">
+              <button
+                type="button"
+                className={`pill-btn ${form.sources.includes("openalex") ? "active" : ""}`}
+                onClick={() => toggleSource("openalex")}
+              >
+                OpenAlex
+              </button>
+              <button
+                type="button"
+                className={`pill-btn ${form.sources.includes("crossref") ? "active" : ""}`}
+                onClick={() => toggleSource("crossref")}
+              >
+                Crossref
+              </button>
+            </div>
+          </div>
+          <div className="modal-section">
+            <div className="modal-section-label">采集后处理</div>
+            <div className="modal-switches">
+              <button
+                type="button"
+                className={`switch-card ${form.downloadOpenPdf ? "on" : ""}`}
+                onClick={() => update("downloadOpenPdf", !form.downloadOpenPdf)}
+              >
+                <span className="switch-card-text">
+                  <strong>下载开放 PDF</strong>
+                  <small>采集时下载开放获取的 PDF 到本地</small>
+                </span>
+                <span className={`switch-toggle ${form.downloadOpenPdf ? "on" : ""}`} />
+              </button>
+              <button
+                type="button"
+                className={`switch-card ${form.autoAnalyze ? "on" : ""}`}
+                onClick={() => update("autoAnalyze", !form.autoAnalyze)}
+              >
+                <span className="switch-card-text">
+                  <strong>AI 分析</strong>
+                  <small>采集入库后自动逐篇调用 AI 分析</small>
+                </span>
+                <span className={`switch-toggle ${form.autoAnalyze ? "on" : ""}`} />
+              </button>
+            </div>
+          </div>
         </div>
         <div className="modal-footer">
           <button type="button" className="btn-ghost" onClick={onClose}>
