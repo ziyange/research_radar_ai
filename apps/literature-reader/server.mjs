@@ -12,6 +12,7 @@ const dataDir = path.join(__dirname, "local-data");
 const papersDir = path.join(dataDir, "papers");
 const downloadsDir = path.join(dataDir, "downloads");
 const reportsDir = path.join(dataDir, "reports");
+const mailOutboxDir = path.join(dataDir, "mail-outbox");
 const libraryFile = path.join(dataDir, "library.json");
 const tasksFile = path.join(dataDir, "tasks.json");
 const port = Number(process.env.LITERATURE_READER_PORT || 4177);
@@ -20,6 +21,7 @@ const defaultLibrary = {
   papers: [],
   scanRuns: [],
   reports: [],
+  mailDeliveries: [],
 };
 
 const defaultTasks = { tasks: [] };
@@ -27,6 +29,8 @@ const defaultTasks = { tasks: [] };
 const maxAiConcurrency = Number(process.env.LITERATURE_READER_AI_CONCURRENCY || 3);
 let activeAiJobs = 0;
 const pendingAiJobs = [];
+const activeTaskRuns = new Set();
+let mailAuthSession = null;
 
 function enqueueAiJob(work) {
   return new Promise((resolve, reject) => {
@@ -76,6 +80,7 @@ async function ensureDataDirs() {
   await mkdir(papersDir, { recursive: true });
   await mkdir(downloadsDir, { recursive: true });
   await mkdir(reportsDir, { recursive: true });
+  await mkdir(mailOutboxDir, { recursive: true });
   if (!existsSync(libraryFile)) {
     await writeFile(libraryFile, JSON.stringify(defaultLibrary, null, 2), "utf8");
   }
@@ -121,7 +126,7 @@ function sendJson(response, status, payload) {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
   });
   response.end(JSON.stringify(payload));
 }
@@ -131,6 +136,21 @@ async function readJson(request) {
   for await (const chunk of request) chunks.push(chunk);
   const raw = Buffer.concat(chunks).toString("utf8");
   return raw ? JSON.parse(raw) : {};
+}
+
+async function readBinary(request, maxBytes = 80 * 1024 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      const error = new Error("FILE_TOO_LARGE");
+      error.status = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 function slug(value) {
@@ -796,6 +816,37 @@ function publicFileUrl(localPath) {
   return localPath ? `/local-data/${localPath.replace(/^local-data\//, "")}` : "";
 }
 
+function localPathFromReaderRoot(target) {
+  return path.relative(__dirname, target).replace(/\\/g, "/");
+}
+
+function shortForMail(value, max = 72) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function agentMailCliPath() {
+  if (process.env.AGENT_MAIL_CLI) return process.env.AGENT_MAIL_CLI;
+  const appData = process.env.APPDATA;
+  if (appData) {
+    const bundled = path.join(
+      appData,
+      "npm",
+      "node_modules",
+      "@tencent-qqmail",
+      "agently-cli-win32-x64",
+      "bin",
+      "agently-cli.exe"
+    );
+    if (existsSync(bundled)) return bundled;
+  }
+  return "agently-cli";
+}
+
+function agentMailEnabled() {
+  return process.env.AGENT_MAIL_ENABLED !== "false";
+}
+
 function serializeLibrary(library) {
   return {
     ...library,
@@ -809,7 +860,356 @@ function serializeLibrary(library) {
       ...report,
       markdownUrl: publicFileUrl(report.markdownPath),
     })),
+    mailDeliveries: (library.mailDeliveries || []).map((delivery) => ({
+      ...delivery,
+      markdownUrl: publicFileUrl(delivery.markdownPath),
+      confirmationToken: delivery.confirmationToken ? "ctk_***" : "",
+    })),
   };
+}
+
+function runAgentMailCli(args, options = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(agentMailCliPath(), args, {
+        cwd: options.cwd || __dirname,
+        env: { ...process.env },
+        windowsHide: true,
+      });
+    } catch (error) {
+      resolve({ code: -1, stdout: "", stderr: String(error.message || error) });
+      return;
+    }
+    const stdout = [];
+    const stderr = [];
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      resolve({ code: -1, stdout: Buffer.concat(stdout).toString("utf8"), stderr: "AGENT_MAIL_TIMEOUT" });
+    }, options.timeoutMs || 30000);
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ code: -1, stdout: "", stderr: String(error.message || error) });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({
+        code,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      });
+    });
+  });
+}
+
+function parseCliJson(output) {
+  const trimmed = String(output || "").trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const match = trimmed.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function extractConfirmation(output) {
+  const text = String(output || "");
+  const json = parseCliJson(text);
+  const token = text.match(/ctk_[A-Za-z0-9_-]+/)?.[0] || "";
+  return {
+    token:
+      token ||
+      json?.confirmation_token ||
+      json?.confirmationToken ||
+      json?.data?.confirmation_token ||
+      json?.data?.confirmationToken ||
+      "",
+    summary: json?.summary || json?.data?.summary || text.slice(0, 1200),
+  };
+}
+
+async function getAgentMailStatus() {
+  const cli = agentMailCliPath();
+  const installed = cli !== "agently-cli" ? existsSync(cli) : true;
+  if (!installed) {
+    return {
+      enabled: agentMailEnabled(),
+      installed: false,
+      authorized: false,
+      email: "",
+      sendCapable: false,
+      cli,
+      message: "Agent Mail CLI 未安装",
+    };
+  }
+  const result = await runAgentMailCli(["+me"], { timeoutMs: 12000 });
+  const json = parseCliJson(result.stdout);
+  const primary = json?.data?.aliases?.find((alias) => alias.is_primary) || json?.data?.aliases?.[0];
+  return {
+    enabled: agentMailEnabled(),
+    installed: true,
+    authorized: Boolean(result.code === 0 && primary?.email),
+    email: primary?.email || "",
+    sendCapable: Boolean(result.code === 0 && primary?.email),
+    cli,
+    message: result.code === 0 ? "ok" : (result.stderr || result.stdout || "Agent Mail 未授权"),
+  };
+}
+
+function deliverySubject(kind, paper, task) {
+  const prefix = kind === "analysis_report" ? "AI 分析" : kind === "paper_fulltext" ? "完整文献" : "测试邮件";
+  return `[研知雷达] ${prefix} · ${shortForMail(paper?.title || task?.query || "Agent Mail")}`;
+}
+
+function buildPaperDeliveryMarkdown({ paper, task, run }) {
+  return [
+    `# ${paper.title}`,
+    "",
+    "| 字段 | 内容 |",
+    "| --- | --- |",
+    `| 研究方向 | ${task?.query || run?.query || ""} |`,
+    `| DOI | ${paper.doi || "未提供"} |`,
+    `| 年份 | ${paper.year || "未知"} |`,
+    `| 期刊 | ${paper.journal || paper.source || "未知"} |`,
+    `| 来源 | ${paper.source || "未知"} |`,
+    `| 匹配评分 | ${Math.round(paper.rawScore || 0)} |`,
+    `| 开放获取 | ${paper.openAccess ? "是" : "未知或受限"} |`,
+    `| 本地 PDF | ${paper.localPdfPath || "未下载"} |`,
+    `| 本地 Markdown | ${paper.localFullTextPath || paper.localMarkdownPath || "未保存"} |`,
+    "",
+    "## 作者",
+    "",
+    (paper.authors || []).length ? (paper.authors || []).map((author) => `- ${author}`).join("\n") : "未提供",
+    "",
+    "## 关键词",
+    "",
+    (paper.keywords || []).length ? (paper.keywords || []).map((keyword) => `- ${keyword}`).join("\n") : "未提供",
+    "",
+    "## 摘要",
+    "",
+    paper.abstract || "未提供摘要。",
+    "",
+    "## 文件与链接",
+    "",
+    `- DOI/来源链接: ${doiUrl(paper.doi) || paper.landingPageUrl || paper.sourceUrl || "未提供"}`,
+    `- 在线 PDF: ${paper.pdfUrl || "未提供"}`,
+    `- 本地 PDF: ${paper.localPdfPath || "未下载"}`,
+    `- 本地 Markdown: ${paper.localFullTextPath || paper.localMarkdownPath || "未保存"}`,
+  ].join("\n");
+}
+
+async function addMailDelivery({ kind, task, run, paper, report, markdown }) {
+  const id = `mail_${randomUUID()}`;
+  const subject = deliverySubject(kind, paper, task);
+  const body = markdown || report?.markdown || buildPaperDeliveryMarkdown({ paper, task, run });
+  const filePath = path.join(mailOutboxDir, `${slug(subject)}-${id}.md`);
+  await writeFile(filePath, body, "utf8");
+  const delivery = {
+    id,
+    kind,
+    taskId: task?.id || run?.taskId || null,
+    runId: run?.id || null,
+    paperId: paper?.id || null,
+    reportId: report?.id || null,
+    recipient: "",
+    subject,
+    markdownPath: localPathFromReaderRoot(filePath),
+    status: "queued",
+    confirmationToken: "",
+    confirmationSummary: "",
+    error: agentMailEnabled() ? "" : "AGENT_MAIL_DISABLED",
+    createdAt: new Date().toISOString(),
+    sentAt: "",
+  };
+  let library = await readLibrary();
+  library.mailDeliveries = [delivery, ...(library.mailDeliveries || [])].slice(0, 300);
+  await saveLibrary(library);
+  if (agentMailEnabled()) {
+    library = await attemptMailDelivery(id);
+  }
+  return { delivery: (library.mailDeliveries || []).find((item) => item.id === id) || delivery, library };
+}
+
+async function attemptMailDelivery(id, confirmationToken = "") {
+  const library = await readLibrary();
+  const index = (library.mailDeliveries || []).findIndex((item) => item.id === id);
+  if (index < 0) return library;
+  const delivery = library.mailDeliveries[index];
+  const status = await getAgentMailStatus();
+  if (!status.enabled) {
+    library.mailDeliveries[index] = { ...delivery, status: "queued", error: "AGENT_MAIL_DISABLED" };
+    await saveLibrary(library);
+    return library;
+  }
+  if (!status.installed || !status.authorized || !status.sendCapable) {
+    library.mailDeliveries[index] = { ...delivery, status: "failed", error: status.message || "AGENT_MAIL_NOT_READY" };
+    await saveLibrary(library);
+    return library;
+  }
+  const recipient = process.env.AGENT_MAIL_RECIPIENT || status.email;
+  const args = [
+    "message",
+    "+send",
+    "--to",
+    recipient,
+    "--subject",
+    delivery.subject,
+    "--body-file",
+    delivery.markdownPath,
+  ];
+  if (confirmationToken) args.push("--confirmation-token", confirmationToken);
+  library.mailDeliveries[index] = { ...delivery, status: "sending", recipient, error: "" };
+  await saveLibrary(library);
+  const result = await runAgentMailCli(args, { timeoutMs: 45000 });
+  const output = `${result.stdout}\n${result.stderr}`.trim();
+  const confirmation = extractConfirmation(output);
+  const json = parseCliJson(output);
+  const updated = await readLibrary();
+  const latestIndex = (updated.mailDeliveries || []).findIndex((item) => item.id === id);
+  if (latestIndex < 0) return updated;
+  const latest = updated.mailDeliveries[latestIndex];
+  if (result.code === 0 && !confirmation.token) {
+    updated.mailDeliveries[latestIndex] = {
+      ...latest,
+      status: "sent",
+      recipient,
+      sentAt: new Date().toISOString(),
+      error: "",
+      providerMessageId: json?.data?.message_id || json?.message_id || "",
+    };
+  } else if (confirmation.token) {
+    updated.mailDeliveries[latestIndex] = {
+      ...latest,
+      status: "pending_confirmation",
+      recipient,
+      confirmationToken: confirmation.token,
+      confirmationSummary: confirmation.summary,
+      error: "AGENT_MAIL_CONFIRMATION_REQUIRED",
+    };
+  } else {
+    updated.mailDeliveries[latestIndex] = {
+      ...latest,
+      status: "failed",
+      recipient,
+      error: output || `AGENT_MAIL_EXIT_${result.code}`,
+    };
+  }
+  await saveLibrary(updated);
+  return updated;
+}
+
+async function startAgentMailAuth() {
+  if (mailAuthSession?.status === "running" && mailAuthSession.url) {
+    return mailAuthSession;
+  }
+  const session = {
+    id: `mail_auth_${randomUUID()}`,
+    status: "running",
+    url: "",
+    output: "",
+    error: "",
+    startedAt: new Date().toISOString(),
+    completedAt: "",
+  };
+  mailAuthSession = session;
+  let child;
+  try {
+    child = spawn(agentMailCliPath(), ["auth", "login"], {
+      cwd: __dirname,
+      env: { ...process.env },
+      windowsHide: true,
+    });
+  } catch (error) {
+    session.status = "failed";
+    session.error = String(error.message || error);
+    session.completedAt = new Date().toISOString();
+    return session;
+  }
+  const settleFromText = (chunk) => {
+    session.output += chunk;
+    const url = session.output.match(/https?:\/\/\S+/)?.[0] || "";
+    if (url && !session.url) session.url = url;
+  };
+  child.stdout.on("data", (chunk) => settleFromText(chunk.toString("utf8")));
+  child.stderr.on("data", (chunk) => settleFromText(chunk.toString("utf8")));
+  child.on("error", (error) => {
+    session.status = "failed";
+    session.error = String(error.message || error);
+    session.completedAt = new Date().toISOString();
+  });
+  child.on("close", (code) => {
+    session.status = code === 0 ? "completed" : "failed";
+    session.error = code === 0 ? "" : session.output || `AGENT_MAIL_AUTH_EXIT_${code}`;
+    session.completedAt = new Date().toISOString();
+  });
+  const started = Date.now();
+  while (!session.url && session.status === "running" && Date.now() - started < 15000) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  if (!session.url && session.status === "running") {
+    session.error = "AGENT_MAIL_AUTH_URL_TIMEOUT";
+  }
+  return session;
+}
+
+async function handleMailStatus(response) {
+  const status = await getAgentMailStatus();
+  sendJson(response, 200, { ...status, authSession: mailAuthSession });
+}
+
+async function handleMailAuthStart(response) {
+  const session = await startAgentMailAuth();
+  if (!session.url) {
+    return sendJson(response, 503, {
+      error: "AGENT_MAIL_AUTH_URL_MISSING",
+      message: session.error || session.output || "未获取到授权链接",
+      session,
+    });
+  }
+  sendJson(response, 200, {
+    authUrl: session.url,
+    session,
+  });
+}
+
+async function handleMailOutbox(response) {
+  const library = await readLibrary();
+  sendJson(response, 200, { deliveries: serializeLibrary(library).mailDeliveries || [] });
+}
+
+async function handleMailTest(response) {
+  const paper = {
+    id: "mail_test",
+    title: "Agent Mail 测试邮件",
+    abstract: "这是一封由本地文献阅读器生成的 Agent Mail 测试邮件。",
+    source: "local",
+  };
+  const { library } = await addMailDelivery({
+    kind: "mail_test",
+    task: { query: "Agent Mail 测试" },
+    paper,
+    markdown: "# Agent Mail 测试邮件\n\n如果你看到这封邮件，说明本地 outbox 已经成功生成并尝试通过 Agent Mail CLI 投递。",
+  });
+  sendJson(response, 200, { library: serializeLibrary(library) });
+}
+
+async function handleMailConfirm(id, response) {
+  const library = await readLibrary();
+  const delivery = (library.mailDeliveries || []).find((item) => item.id === id);
+  if (!delivery) return sendJson(response, 404, { error: "MAIL_DELIVERY_NOT_FOUND" });
+  if (!delivery.confirmationToken) {
+    return sendJson(response, 400, { error: "MAIL_CONFIRMATION_TOKEN_MISSING" });
+  }
+  const updated = await attemptMailDelivery(id, delivery.confirmationToken);
+  sendJson(response, 200, { library: serializeLibrary(updated) });
 }
 
 function normalizeStoredPaper(paper) {
@@ -1073,15 +1473,18 @@ async function savePaperAsset(paper, downloadOpenPdf) {
   return enriched;
 }
 
-async function handleScan(request, response) {
-  const body = request._body || await readJson(request);
-  const taskId = request._taskId || body.taskId || null;
+async function performScan(body, taskId = null, trigger = "manual") {
   const query = String(body.query || "").trim();
   const count = Math.max(1, Math.min(20, Number(body.count || 5)));
   const yearFrom = body.yearFrom ? Number(body.yearFrom) : null;
   const minScore = body.minScore ? Number(body.minScore) : 0;
   const sources = Array.isArray(body.sources) && body.sources.length ? body.sources : ["openalex", "crossref"];
-  if (!query) return sendJson(response, 400, { error: "QUERY_REQUIRED" });
+  if (!query) {
+    const error = new Error("QUERY_REQUIRED");
+    error.status = 400;
+    error.code = "QUERY_REQUIRED";
+    throw error;
+  }
 
   const queryPlan = await expandResearchQueries(query);
   const fetchLimitPerQuery = Math.max(120, count * 30);
@@ -1141,6 +1544,7 @@ async function handleScan(request, response) {
     id: `scan_${randomUUID()}`,
     taskId,
     query,
+    trigger,
     count,
     yearFrom,
     minScore,
@@ -1166,7 +1570,20 @@ async function handleScan(request, response) {
   library.papers = [...saved, ...library.papers];
   library.scanRuns = [run, ...(library.scanRuns || [])].slice(0, 30);
   await saveLibrary(library);
-  sendJson(response, 200, { run, papers: saved, duplicates, library: serializeLibrary(library) });
+  return { run, papers: saved, duplicates, library: serializeLibrary(library) };
+}
+
+async function handleScan(request, response) {
+  const body = request._body || await readJson(request);
+  try {
+    const result = await performScan(body, request._taskId || body.taskId || null, request._trigger || "manual");
+    sendJson(response, 200, result);
+  } catch (error) {
+    sendJson(response, error.status || 500, {
+      error: error.code || "SCAN_FAILED",
+      message: String(error.message || error),
+    });
+  }
 }
 
 function aiConfigured() {
@@ -1193,50 +1610,48 @@ async function callAiForMarkdown(papers, scanContext) {
     sections.push(await callAiForSinglePaperMarkdown(paper, scanContext, index + 1));
   }
   const isSinglePaper = papers.length === 1;
+  if (isSinglePaper) {
+    return [
+      `# ${papers[0].title} AI 阅读报告`,
+      "",
+      `- 生成时间: ${new Date().toISOString()}`,
+      `- 模型: ${process.env.OPENAI_MODEL}`,
+      `- 数据来源: 本地已保存论文资产`,
+      "",
+      ...sections,
+    ].join("\n");
+  }
   return [
-    `# ${isSinglePaper ? papers[0].title : scanContext.query || "本地文献"} AI 阅读报告`,
+    `# ${scanContext.query || "本地文献"} AI 阅读报告`,
     "",
     `- 生成时间: ${new Date().toISOString()}`,
     `- 模型: ${process.env.OPENAI_MODEL}`,
     `- 文献数量: ${papers.length}`,
     `- 数据来源: 本地已保存 Markdown/元数据`,
-    isSinglePaper ? `- 对应文献: ${papers[0].title}` : "",
     "",
-    isSinglePaper ? "## 单篇阅读路径" : "## 阅读顺序建议",
+    "## 阅读顺序建议",
     "",
-    ...(isSinglePaper
-      ? [
-          "1. 先读中文标题翻译与摘要完整翻译，确认主题是否命中。",
-          "2. 再读论文重点内容深度分析，理解研究对象、方法路线、结果与限制。",
-          "3. 最后读证据 claims、阅读关注点和下一步检索建议，决定是否进入原文/PDF精读。",
-        ]
-      : papers.map(
-          (paper, index) =>
-            `${index + 1}. ${paper.title} (${paper.year || "未知年份"}, ${paper.journal || paper.source})`
-        )),
+    ...papers.map(
+      (paper, index) =>
+        `${index + 1}. ${paper.title} (${paper.year || "未知年份"}, ${paper.journal || paper.source})`
+    ),
     "",
     ...sections,
-    "",
-    "## 下一步检索建议",
-    "",
-    "- 回到原文核验方法、图表、实验条件、统计显著性和补充材料。",
-    "- 对开放全文论文优先下载 PDF 并补充全文级分析。",
-    "- 针对匹配方向继续扩展同材料体系、同方法路线、同指标结果和关键机制文献。",
   ].join("\n");
 }
 
 async function callAiForSinglePaperMarkdown(paper, scanContext, index) {
   const prompt = [
     "你是严谨的科研文献分析助手。请输出 Markdown，不要输出 JSON。",
-    "任务：基于本地已保存的单篇论文元数据和摘要，生成该论文的中文科研阅读分析。",
-    "必须包含这些二级标题：研究主题、文献信息总表、核心逻辑流程图、中文标题翻译、摘要完整翻译、论文重点内容深度分析、实验/方法拆解、结果与证据、局限与不可追溯点、文献匹配方向、可借鉴的点、研究人员阅读关注点、事实 claims 与证据、精读问题清单、下一步检索建议。",
+    "任务：基于本地已保存的单篇论文资产，生成该论文的中文科研阅读分析。",
+    "必须只包含这些二级标题，且不要重复标题：中文标题翻译、摘要完整翻译、文献信息总表、研究主题、核心逻辑流程图、方法与实验设计、关键结果与证据、局限与不可追溯点、可借鉴的点、与当前研究方向的关系、精读问题、后续检索建议。",
     "文献信息总表必须用 Markdown 表格呈现，至少包含：标题、作者、年份、期刊、研究背景、研究目的、研究方法、研究结论、证据范围。",
     "核心逻辑流程图必须用 Mermaid flowchart 代码块呈现，格式为 ```mermaid 开头，展示 背景/问题 -> 目的 -> 方法 -> 结果 -> 结论 -> 可借鉴点；如果证据不足，用“待原文核验”节点标出。",
-    "论文重点内容深度分析至少覆盖：研究问题、材料/对象、方法路线、关键变量、评价指标、主要发现、机制解释、创新点、可复用方法、潜在风险。",
-    "研究人员阅读关注点至少覆盖：是否值得下载全文、哪些图表/实验条件最值得核验、与当前方向的直接相关性、可迁移方法、可能补充的对照实验。",
+    "方法与实验设计至少覆盖：研究问题、材料/对象、方法路线、关键变量、评价指标、主要发现、机制解释、创新点、可复用方法、潜在风险。",
+    "精读问题至少覆盖：是否值得下载全文、哪些图表/实验条件最值得核验、与当前方向的直接相关性、可迁移方法、可能补充的对照实验。",
     "如果没有全文或本地 PDF，只能说明基于摘要/元数据，不得声称阅读了正文、图表、实验数据、统计结果或补充材料；不得用常识补全作者没有提供的实验细节。",
     "所有结论必须标明证据范围：摘要可追溯、元数据可追溯、需回到原文核验、AI 推测。证据不足时宁可写“不足以判断”。",
-    "文献匹配方向要按：研究对象/材料、方法/技术路线、指标/结果、机制、应用场景、发表时间、证据类型、开放全文可得性、排除条件冲突、研究空白/方法迁移价值。",
+    "与当前研究方向的关系要按：研究对象/材料、方法/技术路线、指标/结果、机制、应用场景、发表时间、证据类型、开放全文可得性、排除条件冲突、研究空白/方法迁移价值。",
     `检索上下文：${JSON.stringify(scanContext, null, 2)}`,
     `论文序号：${index}`,
     `本地论文：${JSON.stringify(paper, null, 2)}`,
@@ -1252,6 +1667,33 @@ async function callAiForSinglePaperMarkdown(paper, scanContext, index) {
     ],
   });
   return payload.choices?.[0]?.message?.content || "";
+}
+
+async function createAnalysisReport(papers, options = {}) {
+  const markdown = await enqueueAiJob(() => callAiForMarkdown(papers, {
+    query: options.query || "",
+    generatedFrom: options.generatedFrom || "local-library",
+    paperCount: papers.length,
+  }));
+  const report = {
+    id: `report_${randomUUID()}`,
+    title: options.title || `${options.query || "本地文献"} AI 阅读报告`,
+    paperIds: papers.map((paper) => paper.id),
+    model: process.env.OPENAI_MODEL,
+    createdAt: new Date().toISOString(),
+    markdownPath: "",
+    markdown,
+  };
+  const reportPath = path.join(reportsDir, `${slug(report.title)}-${report.id}.md`);
+  await writeFile(reportPath, markdown, "utf8");
+  report.markdownPath = localPathFromReaderRoot(reportPath);
+  const latestLibrary = await readLibrary();
+  latestLibrary.reports = [report, ...(latestLibrary.reports || [])].slice(0, 100);
+  await saveLibrary(latestLibrary);
+  return {
+    report: { ...report, markdownUrl: publicFileUrl(report.markdownPath) },
+    library: latestLibrary,
+  };
 }
 
 function postOpenAiCompatibleJson(payload) {
@@ -1344,33 +1786,67 @@ async function handleAnalyze(request, response) {
   if (!papers.length) return sendJson(response, 400, { error: "NO_LOCAL_PAPERS" });
 
   try {
-    const markdown = await enqueueAiJob(() => callAiForMarkdown(papers, {
+    const { report, library: latestLibrary } = await createAnalysisReport(papers, {
       query: body.query || library.scanRuns?.[0]?.query || "",
-      generatedFrom: "local-library",
-      paperCount: papers.length,
-    }));
-    const report = {
-      id: `report_${randomUUID()}`,
       title: body.title || `${body.query || "本地文献"} AI 阅读报告`,
-      paperIds: papers.map((paper) => paper.id),
-      model: process.env.OPENAI_MODEL,
-      createdAt: new Date().toISOString(),
-      markdownPath: "",
-      markdown,
-    };
-    const reportPath = path.join(reportsDir, `${slug(report.title)}-${report.id}.md`);
-    await writeFile(reportPath, markdown, "utf8");
-    report.markdownPath = path.relative(__dirname, reportPath).replace(/\\/g, "/");
-    const latestLibrary = await readLibrary();
-    latestLibrary.reports = [report, ...(latestLibrary.reports || [])].slice(0, 30);
-    await saveLibrary(latestLibrary);
+      generatedFrom: "local-library",
+    });
     sendJson(response, 200, {
-      report: { ...report, markdownUrl: publicFileUrl(report.markdownPath) },
+      report,
       library: serializeLibrary(latestLibrary),
     });
   } catch (error) {
     sendJson(response, 503, { error: "AI_ANALYSIS_FAILED", message: String(error.message || error) });
   }
+}
+
+function localDateKey(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function minutesOfDay(time) {
+  const match = String(time || "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return 9 * 60;
+  return Math.min(23, Math.max(0, Number(match[1]))) * 60 + Math.min(59, Math.max(0, Number(match[2])));
+}
+
+function scheduledIsoForDate(date, time) {
+  const [hour, minute] = String(time || "09:00").split(":").map((item) => Number(item));
+  const next = new Date(date);
+  next.setHours(Number.isFinite(hour) ? hour : 9, Number.isFinite(minute) ? minute : 0, 0, 0);
+  return next.toISOString();
+}
+
+function computeNextScheduledRunAt(task, from = new Date()) {
+  if (!task.dailyEnabled) return "";
+  const today = new Date(from);
+  const todayMinutes = from.getHours() * 60 + from.getMinutes();
+  const scheduledMinutes = minutesOfDay(task.dailyTime);
+  const targetDate = todayMinutes < scheduledMinutes ? today : new Date(today.getTime() + 24 * 60 * 60 * 1000);
+  return scheduledIsoForDate(targetDate, task.dailyTime);
+}
+
+function normalizeTaskPayload(body, existing = {}) {
+  const query = String(body.query ?? existing.query ?? "").trim();
+  if (!query) return null;
+  const dailyEnabled = body.dailyEnabled !== undefined ? Boolean(body.dailyEnabled) : Boolean(existing.dailyEnabled);
+  const dailyTime = String(body.dailyTime || existing.dailyTime || "09:00").match(/^\d{1,2}:\d{2}$/)
+    ? String(body.dailyTime || existing.dailyTime || "09:00").padStart(5, "0")
+    : "09:00";
+  return {
+    query,
+    count: body.count !== undefined ? Math.max(1, Math.min(20, Number(body.count))) : (existing.count || 5),
+    yearFrom: body.yearFrom !== undefined ? (body.yearFrom ? Number(body.yearFrom) : null) : (existing.yearFrom ?? null),
+    minScore: body.minScore !== undefined ? (body.minScore ? Number(body.minScore) : 0) : (existing.minScore || 0),
+    sources: Array.isArray(body.sources) && body.sources.length ? body.sources : (existing.sources || ["openalex", "crossref"]),
+    downloadOpenPdf: body.downloadOpenPdf !== undefined ? body.downloadOpenPdf !== false : existing.downloadOpenPdf !== false,
+    autoAnalyze: body.autoAnalyze !== undefined ? Boolean(body.autoAnalyze) : Boolean(existing.autoAnalyze),
+    dailyEnabled,
+    dailyTime,
+    dailyTimezone: body.dailyTimezone || existing.dailyTimezone || "Asia/Shanghai",
+    notifyAfterRun: body.notifyAfterRun !== undefined ? Boolean(body.notifyAfterRun) : existing.notifyAfterRun !== false,
+  };
 }
 
 async function handleListTasks(response) {
@@ -1380,18 +1856,15 @@ async function handleListTasks(response) {
 
 async function handleCreateTask(request, response) {
   const body = await readJson(request);
-  const query = String(body.query || "").trim();
-  if (!query) return sendJson(response, 400, { error: "QUERY_REQUIRED" });
+  const payload = normalizeTaskPayload(body);
+  if (!payload) return sendJson(response, 400, { error: "QUERY_REQUIRED" });
   const now = new Date().toISOString();
   const task = {
     id: `task_${randomUUID()}`,
-    query,
-    count: Math.max(1, Math.min(20, Number(body.count || 5))),
-    yearFrom: body.yearFrom ? Number(body.yearFrom) : null,
-    minScore: body.minScore ? Number(body.minScore) : 0,
-    sources: Array.isArray(body.sources) && body.sources.length ? body.sources : ["openalex", "crossref"],
-    downloadOpenPdf: body.downloadOpenPdf !== false,
-    autoAnalyze: Boolean(body.autoAnalyze),
+    ...payload,
+    lastScheduledRunDate: "",
+    lastScheduledRunAt: "",
+    nextScheduledRunAt: computeNextScheduledRunAt(payload),
     createdAt: now,
     updatedAt: now,
   };
@@ -1406,17 +1879,12 @@ async function handleUpdateTask(id, request, response) {
   const tasks = await readTasks();
   const index = tasks.tasks.findIndex((t) => t.id === id);
   if (index < 0) return sendJson(response, 404, { error: "TASK_NOT_FOUND" });
-  const query = String(body.query || "").trim();
-  if (!query) return sendJson(response, 400, { error: "QUERY_REQUIRED" });
+  const payload = normalizeTaskPayload(body, tasks.tasks[index]);
+  if (!payload) return sendJson(response, 400, { error: "QUERY_REQUIRED" });
   tasks.tasks[index] = {
     ...tasks.tasks[index],
-    query,
-    count: body.count !== undefined ? Math.max(1, Math.min(20, Number(body.count))) : tasks.tasks[index].count,
-    yearFrom: body.yearFrom !== undefined ? (body.yearFrom ? Number(body.yearFrom) : null) : tasks.tasks[index].yearFrom,
-    minScore: body.minScore !== undefined ? (body.minScore ? Number(body.minScore) : 0) : tasks.tasks[index].minScore,
-    sources: Array.isArray(body.sources) && body.sources.length ? body.sources : tasks.tasks[index].sources,
-    downloadOpenPdf: body.downloadOpenPdf !== undefined ? body.downloadOpenPdf !== false : tasks.tasks[index].downloadOpenPdf,
-    autoAnalyze: body.autoAnalyze !== undefined ? Boolean(body.autoAnalyze) : tasks.tasks[index].autoAnalyze,
+    ...payload,
+    nextScheduledRunAt: computeNextScheduledRunAt(payload),
     updatedAt: new Date().toISOString(),
   };
   await saveTasks(tasks);
@@ -1432,22 +1900,178 @@ async function handleDeleteTask(id, response) {
   sendJson(response, 200, { deleted: id });
 }
 
-async function handleRunTask(id, request, response) {
+async function createTaskNotifications(task, run, papers) {
+  if (!task.notifyAfterRun || !papers.length) return [];
+  const deliveries = [];
+  if (task.autoAnalyze) {
+    for (const paper of papers) {
+      try {
+        const { report, library } = await createAnalysisReport([paper], {
+          query: task.query || paper.title,
+          title: `${paper.title} AI 阅读报告`,
+          generatedFrom: "task-auto-analysis",
+        });
+        const deliveryResult = await addMailDelivery({
+          kind: "analysis_report",
+          task,
+          run,
+          paper,
+          report,
+          markdown: report.markdown,
+        });
+        deliveries.push(deliveryResult.delivery);
+        if (library?.reports) {
+          // Report persistence is handled by createAnalysisReport; this keeps the loop explicit.
+        }
+      } catch (error) {
+        const deliveryResult = await addMailDelivery({
+          kind: "analysis_report",
+          task,
+          run,
+          paper,
+          markdown: [
+            `# ${paper.title} AI 分析失败`,
+            "",
+            `- 错误: ${String(error.message || error)}`,
+            "- 说明: 文献已采集入库，但 AI 分析或邮件准备失败，请回到本地文献库重新生成。",
+          ].join("\n"),
+        });
+        deliveries.push({ ...deliveryResult.delivery, error: String(error.message || error) });
+      }
+    }
+  } else {
+    for (const paper of papers) {
+      const deliveryResult = await addMailDelivery({
+        kind: "paper_fulltext",
+        task,
+        run,
+        paper,
+      });
+      deliveries.push(deliveryResult.delivery);
+    }
+  }
+  return deliveries;
+}
+
+async function updateScheduledTaskAfterRun(taskId, now = new Date()) {
   const tasks = await readTasks();
-  const task = tasks.tasks.find((t) => t.id === id);
-  if (!task) return sendJson(response, 404, { error: "TASK_NOT_FOUND" });
-  const body = await readJson(request);
-  const merged = {
+  const index = tasks.tasks.findIndex((item) => item.id === taskId);
+  if (index < 0) return;
+  const task = tasks.tasks[index];
+  tasks.tasks[index] = {
     ...task,
-    ...(body.sources ? { sources: body.sources } : {}),
-    ...(body.yearFrom !== undefined ? { yearFrom: body.yearFrom } : {}),
-    ...(body.minScore !== undefined ? { minScore: body.minScore } : {}),
+    lastScheduledRunDate: localDateKey(now),
+    lastScheduledRunAt: now.toISOString(),
+    nextScheduledRunAt: computeNextScheduledRunAt(task, now),
+    updatedAt: new Date().toISOString(),
   };
-  handleScan({
-    ...request,
-    _taskId: task.id,
-    _body: merged,
-  }, response);
+  await saveTasks(tasks);
+}
+
+function isTaskDue(task, now = new Date()) {
+  if (!task.dailyEnabled) return false;
+  const today = localDateKey(now);
+  if (task.lastScheduledRunDate === today) return false;
+  return now.getHours() * 60 + now.getMinutes() >= minutesOfDay(task.dailyTime);
+}
+
+async function recordScheduledFailure(task, error) {
+  const library = await readLibrary();
+  const run = {
+    id: `scan_failed_${randomUUID()}`,
+    taskId: task.id,
+    query: task.query,
+    trigger: "scheduled",
+    count: task.count,
+    createdAt: new Date().toISOString(),
+    savedCount: 0,
+    candidateCount: 0,
+    uniqueCount: 0,
+    duplicateCount: 0,
+    savedPaperIds: [],
+    sourceStatuses: [],
+    queryPlan: [],
+    duplicateTitles: [],
+    _failed: true,
+    _errorMessage: String(error.message || error),
+    targetMet: false,
+    exhaustedReason: String(error.message || error),
+  };
+  library.scanRuns = [run, ...(library.scanRuns || [])].slice(0, 30);
+  await saveLibrary(library);
+}
+
+async function schedulerTick() {
+  if (process.env.LITERATURE_READER_SCHEDULER_ENABLED === "false") return;
+  const now = new Date();
+  const tasks = await readTasks();
+  for (const task of tasks.tasks || []) {
+    if (!isTaskDue(task, now) || activeTaskRuns.has(task.id)) continue;
+    try {
+      await runTaskById(task.id, {}, "scheduled");
+    } catch (error) {
+      await recordScheduledFailure(task, error);
+    } finally {
+      await updateScheduledTaskAfterRun(task.id, now);
+    }
+  }
+}
+
+function startScheduler() {
+  if (process.env.LITERATURE_READER_SCHEDULER_ENABLED === "false") return;
+  setInterval(() => {
+    schedulerTick().catch((error) => {
+      console.error("scheduler tick failed", error);
+    });
+  }, 60 * 1000);
+  schedulerTick().catch((error) => {
+    console.error("initial scheduler tick failed", error);
+  });
+}
+
+async function runTaskById(id, overrides = {}, trigger = "manual") {
+  const lockKey = id;
+  if (activeTaskRuns.has(lockKey)) {
+    const error = new Error("TASK_ALREADY_RUNNING");
+    error.status = 409;
+    error.code = "TASK_ALREADY_RUNNING";
+    throw error;
+  }
+  activeTaskRuns.add(lockKey);
+  try {
+    const tasks = await readTasks();
+    const task = tasks.tasks.find((t) => t.id === id);
+    if (!task) {
+      const error = new Error("TASK_NOT_FOUND");
+      error.status = 404;
+      error.code = "TASK_NOT_FOUND";
+      throw error;
+    }
+    const merged = { ...task, ...normalizeTaskPayload({ ...task, ...overrides }, task) };
+    const result = await performScan(merged, task.id, trigger);
+    const mailDeliveries = await createTaskNotifications(merged, result.run, result.papers);
+    const latestLibrary = await readLibrary();
+    return {
+      ...result,
+      mailDeliveries,
+      library: serializeLibrary(latestLibrary),
+    };
+  } finally {
+    activeTaskRuns.delete(lockKey);
+  }
+}
+
+async function handleRunTask(id, request, response) {
+  const body = await readJson(request);
+  try {
+    const result = await runTaskById(id, body, "manual");
+    sendJson(response, 200, result);
+  } catch (error) {
+    sendJson(response, error.status || 500, {
+      error: error.code || "TASK_RUN_FAILED",
+      message: String(error.message || error),
+    });
+  }
 }
 
 async function handleDeletePaper(id, response) {
@@ -1501,6 +2125,47 @@ async function handleFetchFullText(id, response) {
     method: refreshed.method,
     retrieval: refreshed.retrieval,
   });
+}
+
+async function handleUploadPaperPdf(id, request, response) {
+  const library = await readLibrary();
+  const index = library.papers.findIndex((item) => item.id === id);
+  if (index < 0) return sendJson(response, 404, { error: "PAPER_NOT_FOUND" });
+
+  const contentType = String(request.headers["content-type"] || "").toLowerCase();
+  if (!contentType.includes("application/pdf")) {
+    return sendJson(response, 415, { error: "PDF_REQUIRED", message: "请上传 PDF 文件" });
+  }
+
+  try {
+    const file = await readBinary(request);
+    if (!file.subarray(0, 5).toString("utf8").startsWith("%PDF-")) {
+      return sendJson(response, 400, { error: "INVALID_PDF", message: "上传文件不是有效 PDF" });
+    }
+
+    const paper = library.papers[index];
+    const filename = `${slug(paper.title || paper.id)}-${paper.id}-uploaded.pdf`;
+    const target = path.join(papersDir, filename);
+    await removeLocalAsset(paper.localPdfPath);
+    await writeFile(target, file);
+
+    library.papers[index] = {
+      ...paper,
+      localPdfPath: path.relative(__dirname, target).replace(/\\/g, "/"),
+      manualPdfUploadedAt: new Date().toISOString(),
+    };
+    await saveLibrary(library);
+    return sendJson(response, 200, {
+      paper: library.papers[index],
+      library: serializeLibrary(library),
+      method: "manual-upload",
+    });
+  } catch (error) {
+    if (error.status === 413) {
+      return sendJson(response, 413, { error: "FILE_TOO_LARGE", message: "PDF 文件超过 80MB" });
+    }
+    throw error;
+  }
 }
 
 async function serveStatic(request, response) {
@@ -1587,8 +2252,28 @@ async function route(request, response) {
       const id = decodeURIComponent(url.pathname.split("/").at(-2));
       return await handleFetchFullText(id, response);
     }
+    if (url.pathname.startsWith("/api/papers/") && url.pathname.endsWith("/upload-pdf") && request.method === "POST") {
+      const id = decodeURIComponent(url.pathname.split("/").at(-2));
+      return await handleUploadPaperPdf(id, request, response);
+    }
     if (url.pathname === "/api/analyze" && request.method === "POST") {
       return await handleAnalyze(request, response);
+    }
+    if (url.pathname === "/api/mail/status" && request.method === "GET") {
+      return await handleMailStatus(response);
+    }
+    if (url.pathname === "/api/mail/auth/start" && request.method === "POST") {
+      return await handleMailAuthStart(response);
+    }
+    if (url.pathname === "/api/mail/outbox" && request.method === "GET") {
+      return await handleMailOutbox(response);
+    }
+    if (url.pathname === "/api/mail/test" && request.method === "POST") {
+      return await handleMailTest(response);
+    }
+    if (url.pathname.startsWith("/api/mail/deliveries/") && url.pathname.endsWith("/confirm") && request.method === "POST") {
+      const id = decodeURIComponent(url.pathname.split("/").at(-2));
+      return await handleMailConfirm(id, response);
     }
     if (url.pathname === "/api/tasks" && request.method === "GET") {
       return await handleListTasks(response);
@@ -1623,6 +2308,7 @@ async function route(request, response) {
 
 await loadEnv();
 await ensureDataDirs();
+startScheduler();
 createServer(route).listen(port, "127.0.0.1", () => {
   console.log(`Literature reader running at http://127.0.0.1:${port}`);
   console.log(`Local data: ${dataDir}`);
