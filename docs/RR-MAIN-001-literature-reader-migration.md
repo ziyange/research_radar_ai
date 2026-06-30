@@ -1,15 +1,15 @@
-# RR-MAIN-001 文献阅读器 Demo 全量迁移主产品
+# RR-MAIN-001 文献阅读器全量迁移主产品
 
-状态：实施中  
+状态：已迁移，旧独立 demo 已移除  
 日期：2026-06-30  
-范围：以 `apps/literature-reader` 为体验基线，将主产品迁移为正式 Next.js + FastAPI 架构。
+范围：以历史独立文献阅读器体验为基线，将主产品迁移为正式 Next.js + FastAPI 架构。
 
 ## 1. 迁移原则
 
-- 产品体验以 `apps/literature-reader` 为准：采集任务、本地文献库、知识图谱、文献详情、PDF/Markdown 原文、AI 分析报告、删除文档、邮箱绑定、任务日志和自动执行流程不改变。
+- 产品体验以历史文献阅读器为准：采集任务、本地文献库、知识图谱、文献详情、PDF/Markdown 原文、AI 分析报告、删除文档、邮箱绑定、任务日志和自动执行流程不改变。
 - 工程底座以正式文档为准：前端使用 Next.js，后端使用 FastAPI，数据库使用 PostgreSQL JSONB 持久化，后续可拆关系表和 pgvector。
 - 旧 Phase 1 工作台不再作为主入口；主入口直接进入文献阅读器。
-- demo 目录在正式验收前保留为对照和数据导入来源，验收后可以归档或删除。
+- 独立文献阅读器 demo 已删除，避免旧入口与主产品混淆。
 
 ## 2. 功能映射
 
@@ -54,14 +54,14 @@
 
 ## 4. 数据迁移
 
-启动 FastAPI literature 模块时会自动尝试导入：
+启动 FastAPI literature 模块时会自动尝试导入正式本地存储中的历史数据：
 
-- `apps/literature-reader/local-data/library.json`
-- `apps/literature-reader/local-data/tasks.json`
-- `apps/literature-reader/local-data/papers/`
-- `apps/literature-reader/local-data/reports/`
-- `apps/literature-reader/local-data/downloads/`
-- `apps/literature-reader/local-data/mail-outbox/`
+- `storage/literature/imported-local-data/library.json`
+- `storage/literature/imported-local-data/tasks.json`
+- `storage/literature/imported-local-data/papers/`
+- `storage/literature/imported-local-data/reports/`
+- `storage/literature/imported-local-data/downloads/`
+- `storage/literature/imported-local-data/mail-outbox/`
 
 导入后的业务实体写入 PostgreSQL `rr_entities`：
 

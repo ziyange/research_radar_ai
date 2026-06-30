@@ -74,7 +74,7 @@ GET http://127.0.0.1:8010/api/v1/literature/health
 GET http://127.0.0.1:8010/api/v1/literature/library
 ```
 
-首次启动 FastAPI 时，会从 `apps/literature-reader/local-data/` 导入 demo 已有文献、报告、采集记录和任务，再写入 PostgreSQL `rr_entities` 或内存开发存储。
+首次启动 FastAPI 时，会从正式本地存储目录 `storage/literature/imported-local-data/` 导入历史文献、报告、采集记录和任务，再写入 PostgreSQL `rr_entities` 或内存开发存储。
 
 Agent Mail 中“绑定邮箱”是发送账号，不是收件人。推送邮件必须配置收件人：
 
@@ -186,7 +186,7 @@ npm run dev:web
 http://localhost:3000
 ```
 
-当前 `/` 直接进入文献阅读器主界面。旧 Phase 1 工作台、`/knowledge`、`/reports` 页面已经从主 Web 移除；独立 `apps/literature-reader` 仅作为迁移对照保留。
+当前 `/` 直接进入文献阅读器主界面。旧 Phase 1 工作台、`/knowledge`、`/reports` 页面以及独立文献阅读器 demo 已经移除。主前端使用 `http://localhost:3000`，API 使用 `http://127.0.0.1:8010`。
 
 ## Phase 1 本地总验收
 

@@ -19,7 +19,7 @@ from uuid import uuid4
 import httpx
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .db import EntityPersistence
 from .settings import get_settings
@@ -28,7 +28,7 @@ from .settings import get_settings
 router = APIRouter(prefix="/api/v1/literature", tags=["literature"])
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
-DEMO_DATA_DIR = ROOT_DIR / "apps" / "literature-reader" / "local-data"
+IMPORTED_DATA_DIR = ROOT_DIR / "storage" / "literature" / "imported-local-data"
 
 
 def now_iso() -> str:
@@ -247,6 +247,15 @@ class TaskPayload(BaseModel):
     ccEmails: list[str] = Field(default_factory=list)
     bccEmails: list[str] = Field(default_factory=list)
 
+    @field_validator("recipientEmails", "ccEmails", "bccEmails")
+    @classmethod
+    def validate_email_list(cls, values: list[str]) -> list[str]:
+        cleaned = unique_strings([str(item).strip() for item in values if str(item).strip()])
+        invalid = [item for item in cleaned if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", item)]
+        if invalid:
+            raise ValueError(f"Invalid email address: {', '.join(invalid)}")
+        return cleaned
+
 
 class AnalyzePayload(BaseModel):
     paperIds: list[str] | None = None
@@ -308,8 +317,8 @@ class LiteratureRepository:
             self._import_demo_data()
 
     def _import_demo_data(self) -> None:
-        library_path = DEMO_DATA_DIR / "library.json"
-        task_path = DEMO_DATA_DIR / "tasks.json"
+        library_path = IMPORTED_DATA_DIR / "library.json"
+        task_path = IMPORTED_DATA_DIR / "tasks.json"
         if library_path.exists():
             payload = json.loads(library_path.read_text(encoding="utf-8"))
             for key in ["papers", "scanRuns", "reports", "mailDeliveries"]:
@@ -389,7 +398,7 @@ def resolve_reader_file(relative: str) -> Path | None:
     normalized = relative.replace("\\", "/").lstrip("/")
     candidates: list[Path] = []
     if normalized.startswith("local-data/"):
-        candidates.append((DEMO_DATA_DIR.parent / normalized).resolve())
+        candidates.append((IMPORTED_DATA_DIR / normalized.removeprefix("local-data/")).resolve())
     candidates.append((ROOT_DIR / normalized).resolve())
     candidates.append((repository.storage_root / normalized).resolve())
     for candidate in candidates:
@@ -1002,6 +1011,13 @@ def extract_confirmation(output: str) -> tuple[str, str]:
     return (token.group(0) if token else "", summary_match.group(1) if summary_match else output[:1200])
 
 
+def confirmation_token_invalid(output: str) -> bool:
+    payload = parse_cli_json(output) or {}
+    error = payload.get("error") or payload.get("data", {}).get("error") or {}
+    message = str(error.get("message") or output or "").lower()
+    return "confirmation token" in message and ("expired" in message or "invalid" in message)
+
+
 def mail_status() -> dict[str, Any]:
     enabled = get_settings().agent_mail_enabled or get_settings().email_provider == "agent_mail"
     cli = agent_mail_cli_path()
@@ -1214,6 +1230,16 @@ def attempt_mail_delivery(delivery_id: str, confirmation_token: str = "") -> dic
             error="AGENT_MAIL_CONFIRMATION_REQUIRED",
         )
     else:
+        if confirmation_token and confirmation_token_invalid(output):
+            delivery.update(
+                status="queued",
+                confirmationToken="",
+                confirmationSummary="",
+                error="MAIL_CONFIRMATION_EXPIRED_REGENERATING",
+            )
+            repository.library["mailDeliveries"][index] = delivery
+            repository._persist_item("mailDeliveries", delivery)
+            return attempt_mail_delivery(delivery_id)
         delivery.update(status="failed", error=output or f"AGENT_MAIL_EXIT_{result.code}")
     repository.library["mailDeliveries"][index] = delivery
     repository._persist_item("mailDeliveries", delivery)
@@ -1440,6 +1466,20 @@ def start_mail_auth() -> dict[str, Any]:
     }
 
 
+@router.post("/mail/auth:logout")
+def logout_mail_auth() -> dict[str, Any]:
+    result = run_agent_mail(["auth", "logout"], timeout=20)
+    if result.code not in {0, 3}:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "AGENT_MAIL_LOGOUT_FAILED",
+                "message": result.stderr or result.stdout or f"Agent Mail logout failed: {result.code}",
+            },
+        )
+    return {"status": "logged_out", "mail": mail_status()}
+
+
 @router.get("/mail/outbox")
 def get_mail_outbox() -> dict[str, Any]:
     return {"deliveries": repository.serialize_library()["mailDeliveries"]}
@@ -1461,6 +1501,17 @@ def confirm_mail_delivery(delivery_id: str) -> dict[str, Any]:
     if not token:
         raise HTTPException(status_code=400, detail={"code": "MAIL_CONFIRMATION_TOKEN_MISSING"})
     updated = attempt_mail_delivery(delivery_id, token)
+    return {"delivery": repository.serialize_delivery(updated), "library": repository.serialize_library()}
+
+
+@router.post("/mail/deliveries/{delivery_id}:retry")
+def retry_mail_delivery(delivery_id: str) -> dict[str, Any]:
+    delivery = next((item for item in repository.library["mailDeliveries"] if item["id"] == delivery_id), None)
+    if not delivery:
+        raise HTTPException(status_code=404, detail={"code": "MAIL_DELIVERY_NOT_FOUND"})
+    delivery.update(confirmationToken="", confirmationSummary="", error="")
+    repository._persist_item("mailDeliveries", delivery)
+    updated = attempt_mail_delivery(delivery_id)
     return {"delivery": repository.serialize_delivery(updated), "library": repository.serialize_library()}
 
 

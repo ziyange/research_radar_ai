@@ -2329,6 +2329,16 @@ input {
   background: #eaeef0;
 }
 
+.btn-ghost.danger-soft {
+  color: #a13c35;
+  background: #fff5f3;
+  border-color: #efc9c3;
+}
+
+.btn-ghost.danger-soft:hover {
+  background: #ffe9e5;
+}
+
 /* ===== Modal 分组化布局 ===== */
 .modal-section {
   display: flex;
@@ -2501,6 +2511,79 @@ input {
 
 .mail-copy-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mail-push-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px 13px;
+  background: #f8faf7;
+  border: 1px solid #e2e7e1;
+  border-radius: 9px;
+  transition: all 0.15s ease;
+}
+
+.mail-push-card.on {
+  background: #eef8f4;
+  border-color: #b8ddd3;
+}
+
+.mail-push-card.disabled {
+  opacity: 0.68;
+}
+
+.mail-push-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mail-push-toggle {
+  flex: none;
+  min-width: 92px;
+  min-height: 32px;
+  color: #68746f;
+  background: #eef1ed;
+  border: 1px solid #d8ded7;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+  transition: all 0.15s ease;
+}
+
+.mail-push-toggle:not(:disabled):hover {
+  color: #006f60;
+  background: #e5f5ef;
+  border-color: #b8ddd3;
+}
+
+.mail-push-toggle.on {
+  color: #fff;
+  background: #087f70;
+  border-color: #087f70;
+}
+
+.mail-push-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.mail-recipient-inline {
+  display: grid;
+  gap: 9px;
+  padding-top: 2px;
+}
+
+.mail-recipient-inline label {
+  display: grid;
+  gap: 5px;
+}
+
+.mail-recipient-inline label span {
+  color: #58645f;
+  font-size: 11.5px;
+  font-weight: 800;
 }
 
 .modal-hint {

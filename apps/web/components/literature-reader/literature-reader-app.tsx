@@ -70,7 +70,7 @@ async function parseApiResponse(response, fallbackMessage) {
     const looksLikeHtml = /<!doctype|<html[\s>]/i.test(text);
     throw new Error(
       looksLikeHtml
-        ? "请求打到了页面而不是本地 API。请确认 literature-reader 后端服务已启动在 127.0.0.1:4177，或使用 npm run start:reader 打开。"
+        ? "请求打到了页面而不是本地 API。请确认 FastAPI 已启动在 127.0.0.1:8010，并从主前端 http://127.0.0.1:3000 访问。"
         : fallbackMessage,
     );
   }
@@ -104,6 +104,10 @@ const api = {
     const response = await fetch(`${API_BASE}/mail/auth:start`, { method: "POST" });
     return parseApiResponse(response, "启动邮箱授权失败");
   },
+  async logoutMailAuth() {
+    const response = await fetch(`${API_BASE}/mail/auth:logout`, { method: "POST" });
+    return parseApiResponse(response, "退出邮箱授权失败");
+  },
   async getMailOutbox() {
     const response = await fetch(`${API_BASE}/mail/outbox`);
     return parseApiResponse(response, "无法读取邮箱推送记录");
@@ -111,6 +115,10 @@ const api = {
   async confirmMailDelivery(id) {
     const response = await fetch(`${API_BASE}/mail/deliveries/${encodeURIComponent(id)}:confirm`, { method: "POST" });
     return parseApiResponse(response, "确认发送失败");
+  },
+  async retryMailDelivery(id) {
+    const response = await fetch(`${API_BASE}/mail/deliveries/${encodeURIComponent(id)}:retry`, { method: "POST" });
+    return parseApiResponse(response, "重试发送失败");
   },
   async createTask(payload) {
     const response = await fetch(`${API_BASE}/tasks`, {
@@ -179,6 +187,11 @@ function parseEmailList(value) {
     .split(/[,，;\s]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function invalidEmails(values) {
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return values.filter((item) => !emailPattern.test(item));
 }
 
 function scoreTone(score) {
@@ -746,14 +759,18 @@ export function App() {
     }
   }
 
-  async function bindAgentMail() {
+  async function bindAgentMail(forceRebind = false) {
     setError("");
     setLoading("mail-auth");
     try {
+      if (forceRebind) {
+        const logout = await api.logoutMailAuth();
+        setMailStatus(logout.mail || { authorized: false, email: "" });
+      }
       const data = await api.startMailAuth();
       if (data.authUrl) {
         window.open(data.authUrl, "_blank", "noopener,noreferrer");
-        setStatus({ tone: "running", message: "已打开 Agent Mail 授权页面，授权完成后会自动刷新状态" });
+        setStatus({ tone: "running", message: "已打开 Agent Mail 授权页面，请完成二维码登录后再刷新状态" });
       }
       window.setTimeout(() => refresh().catch(() => null), 4000);
       window.setTimeout(() => refresh().catch(() => null), 12000);
@@ -771,7 +788,23 @@ export function App() {
     try {
       const data = await api.confirmMailDelivery(delivery.id);
       setLibrary(data.library);
-      setStatus({ tone: "success", message: "邮件发送已确认" });
+      const message = data.delivery?.status === "sent" ? "邮件发送已确认" : "确认令牌已刷新，请再次确认发送";
+      setStatus({ tone: "success", message });
+    } catch (err) {
+      setError(err.message);
+      setStatus({ tone: "error", message: err.message });
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function retryMailDelivery(delivery) {
+    if (!delivery) return;
+    setLoading(`mail-retry-${delivery.id}`);
+    try {
+      const data = await api.retryMailDelivery(delivery.id);
+      setLibrary(data.library);
+      setStatus({ tone: "success", message: data.delivery?.status === "sent" ? "邮件已发送" : "已重新生成邮件确认" });
     } catch (err) {
       setError(err.message);
       setStatus({ tone: "error", message: err.message });
@@ -1321,6 +1354,7 @@ export function App() {
             mailStatus={mailStatus}
             onBindMail={() => setMailBindModal(true)}
             onConfirmMailDelivery={confirmMailDelivery}
+            onRetryMailDelivery={retryMailDelivery}
             loading={loading}
           />
         ) : null}
@@ -1447,7 +1481,8 @@ export function App() {
           mailStatus={mailStatus}
           loading={loading === "mail-auth"}
           onClose={() => setMailBindModal(false)}
-          onBind={bindAgentMail}
+          onBind={() => bindAgentMail(false)}
+          onRebind={() => bindAgentMail(true)}
           onRefresh={() => refresh().catch(() => null)}
         />
       ) : null}
@@ -1803,8 +1838,16 @@ function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus }) {
   });
   const [mailError, setMailError] = useState("");
   const mailBound = Boolean(mailStatus?.authorized && mailStatus.email);
+  const recipientEmails = parseEmailList(form.recipientEmailsText);
+  const ccEmails = parseEmailList(form.ccEmailsText);
+  const bccEmails = parseEmailList(form.bccEmailsText);
+  const mailInvalids = invalidEmails([...recipientEmails, ...ccEmails, ...bccEmails]);
+  const canEnablePush = mailBound && recipientEmails.length > 0 && mailInvalids.length === 0;
 
   function update(field, value) {
+    if (field === "recipientEmailsText" || field === "ccEmailsText" || field === "bccEmailsText") {
+      setMailError("");
+    }
     setForm((current) => ({ ...current, [field]: value }));
   }
 
@@ -1820,11 +1863,12 @@ function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus }) {
   function submit(event) {
     event.preventDefault();
     setMailError("");
-    const recipientEmails = parseEmailList(form.recipientEmailsText);
-    const ccEmails = parseEmailList(form.ccEmailsText);
-    const bccEmails = parseEmailList(form.bccEmailsText);
     if (mailBound && form.notifyAfterRun && !recipientEmails.length) {
       setMailError("开启推送邮箱时必须填写收件人 To。");
+      return;
+    }
+    if (mailBound && form.notifyAfterRun && mailInvalids.length) {
+      setMailError(`邮箱格式不正确：${mailInvalids.join(", ")}`);
       return;
     }
     const { recipientEmailsText, ccEmailsText, bccEmailsText, ...payload } = form;
@@ -1838,6 +1882,23 @@ function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus }) {
       ccEmails: mailBound && form.notifyAfterRun ? ccEmails : [],
       bccEmails: mailBound && form.notifyAfterRun ? bccEmails : [],
     });
+  }
+
+  function toggleMailPush() {
+    if (!mailBound) return;
+    if (form.notifyAfterRun) {
+      update("notifyAfterRun", false);
+      return;
+    }
+    if (!recipientEmails.length) {
+      setMailError("请先填写收件人 To，再开启推送邮箱。");
+      return;
+    }
+    if (mailInvalids.length) {
+      setMailError(`邮箱格式不正确：${mailInvalids.join(", ")}`);
+      return;
+    }
+    update("notifyAfterRun", true);
   }
 
   return (
@@ -1936,18 +1997,56 @@ function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus }) {
                 </span>
                 <span className={`switch-toggle ${form.autoAnalyze ? "on" : ""}`} />
               </button>
-              <button
-                type="button"
-                className={`switch-card ${form.notifyAfterRun ? "on" : ""}`}
-                disabled={!mailBound}
-                onClick={() => mailBound && update("notifyAfterRun", !form.notifyAfterRun)}
-              >
-                <span className="switch-card-text">
-                  <strong>推送邮箱</strong>
-                  <small>{mailBound ? "任务完成后逐条推送文献或 AI 分析" : "请先在采集任务页绑定 Agent 邮箱"}</small>
-                </span>
-                <span className={`switch-toggle ${form.notifyAfterRun ? "on" : ""}`} />
-              </button>
+              <div className={`mail-push-card ${form.notifyAfterRun ? "on" : ""} ${!mailBound ? "disabled" : ""}`}>
+                <div className="mail-push-head">
+                  <span className="switch-card-text">
+                    <strong>推送邮箱</strong>
+                    <small>{mailBound ? "任务完成后逐条推送文献或 AI 分析" : "请先在采集任务页绑定 Agent 邮箱"}</small>
+                  </span>
+                  <button
+                    type="button"
+                    className={`mail-push-toggle ${form.notifyAfterRun ? "on" : ""}`}
+                    disabled={!mailBound || (!form.notifyAfterRun && !canEnablePush)}
+                    onClick={toggleMailPush}
+                  >
+                    {form.notifyAfterRun ? "已开启" : "开启推送"}
+                  </button>
+                </div>
+                {mailBound ? (
+                  <div className="mail-recipient-inline">
+                    <label>
+                      <span>收件人 To（必填）</span>
+                      <input
+                        value={form.recipientEmailsText}
+                        onChange={(event) => update("recipientEmailsText", event.target.value)}
+                        placeholder="name@example.com，多个邮箱用逗号分隔"
+                      />
+                    </label>
+                    <div className="modal-form-grid mail-copy-grid">
+                      <label>
+                        <span>抄送 CC（可选）</span>
+                        <input
+                          value={form.ccEmailsText}
+                          onChange={(event) => update("ccEmailsText", event.target.value)}
+                          placeholder="cc@example.com"
+                        />
+                      </label>
+                      <label>
+                        <span>密送 BCC（可选）</span>
+                        <input
+                          value={form.bccEmailsText}
+                          onChange={(event) => update("bccEmailsText", event.target.value)}
+                          placeholder="bcc@example.com"
+                        />
+                      </label>
+                    </div>
+                    <p className="modal-hint">
+                      Subject 由系统按每篇文献自动生成；正文使用 Markdown body_file。Agent Mail 返回确认令牌时，右侧记录会显示“确认发送”。
+                    </p>
+                    {mailError ? <p className="modal-error">{mailError}</p> : null}
+                  </div>
+                ) : null}
+              </div>
               <button
                 type="button"
                 className={`switch-card ${form.dailyEnabled ? "on" : ""}`}
@@ -1976,41 +2075,6 @@ function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus }) {
                 </label>
               </div>
             ) : null}
-            {form.notifyAfterRun && mailBound ? (
-              <div className="mail-recipient-box">
-                <div className="modal-section-label">邮件参数</div>
-                <label>
-                  <span>收件人 To（必填）</span>
-                  <input
-                    value={form.recipientEmailsText}
-                    onChange={(event) => update("recipientEmailsText", event.target.value)}
-                    placeholder="name@example.com，多个邮箱用逗号分隔"
-                  />
-                </label>
-                <div className="modal-form-grid mail-copy-grid">
-                  <label>
-                    <span>抄送 CC（可选）</span>
-                    <input
-                      value={form.ccEmailsText}
-                      onChange={(event) => update("ccEmailsText", event.target.value)}
-                      placeholder="cc@example.com"
-                    />
-                  </label>
-                  <label>
-                    <span>密送 BCC（可选）</span>
-                    <input
-                      value={form.bccEmailsText}
-                      onChange={(event) => update("bccEmailsText", event.target.value)}
-                      placeholder="bcc@example.com"
-                    />
-                  </label>
-                </div>
-                <p className="modal-hint">
-                  Subject 由系统按每篇文献自动生成；正文使用 Markdown body_file，未开启 AI 分析时发送完整文献卡片/原文摘要，开启 AI 分析时发送单篇 AI 报告。若 Agent Mail 返回确认令牌，需在右侧推送记录中确认发送。
-                </p>
-                {mailError ? <p className="modal-error">{mailError}</p> : null}
-              </div>
-            ) : null}
             {!mailBound ? (
               <p className="modal-hint">邮箱未绑定时，“推送邮箱”不可开启。请先在采集任务页右上角绑定 Agent Mail。</p>
             ) : null}
@@ -2020,7 +2084,7 @@ function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus }) {
           <button type="button" className="btn-ghost" onClick={onClose}>
             取消
           </button>
-          <button type="submit" className="primary" disabled={loading || !form.query.trim()}>
+          <button type="submit" className="primary" disabled={loading || !form.query.trim() || (form.notifyAfterRun && !canEnablePush)}>
             {loading ? "保存中" : "保存"}
           </button>
         </div>
@@ -2047,7 +2111,7 @@ function formatRunTime(iso) {
   }
 }
 
-function MailBindModal({ mailStatus, loading, onClose, onBind, onRefresh }) {
+function MailBindModal({ mailStatus, loading, onClose, onBind, onRebind, onRefresh }) {
   const bound = Boolean(mailStatus?.authorized && mailStatus.email);
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -2060,13 +2124,13 @@ function MailBindModal({ mailStatus, loading, onClose, onBind, onRefresh }) {
         </div>
         <div className="modal-body">
           <div className={`mail-bind-state ${bound ? "bound" : ""}`}>
-            <strong>{bound ? "已绑定邮箱" : "尚未绑定邮箱"}</strong>
-            <span>{bound ? mailStatus.email : "绑定后，采集任务才能开启“推送邮箱”。"}</span>
+            <strong>{bound ? "当前已授权账号" : "尚未绑定邮箱"}</strong>
+            <span>{bound ? `${mailStatus.email}（来自本机 Agent Mail 授权缓存）` : "绑定后，采集任务才能开启“推送邮箱”。"}</span>
           </div>
           <div className="modal-section">
             <div className="modal-section-label">授权流程</div>
             <p className="modal-hint">
-              点击下方按钮后会打开 Agent Mail 授权页面。完成授权后回到这里刷新状态，系统会把任务执行完成后的文献或 AI 分析按条写入邮箱推送队列。
+              如果这里已经显示账号，说明本机 CLI 之前保存过授权。需要换账号时请点击“切换账号并重新扫码”，系统会先清除旧凭据，再打开 Agent Mail 授权页面。完成扫码后回到这里刷新状态。
             </p>
           </div>
         </div>
@@ -2074,8 +2138,8 @@ function MailBindModal({ mailStatus, loading, onClose, onBind, onRefresh }) {
           <button type="button" className="btn-ghost" onClick={onRefresh}>
             刷新状态
           </button>
-          <button type="button" className="primary" onClick={onBind} disabled={loading}>
-            {loading ? "启动授权中" : bound ? "重新授权" : "打开授权页面"}
+          <button type="button" className={bound ? "btn-ghost danger-soft" : "primary"} onClick={bound ? onRebind : onBind} disabled={loading}>
+            {loading ? "启动授权中" : bound ? "切换账号并重新扫码" : "打开授权页面"}
           </button>
         </div>
       </div>
@@ -2168,7 +2232,29 @@ function mailStatusText(status) {
   return status || "未知";
 }
 
-function MailDeliveryList({ deliveries, onConfirmMailDelivery, loading }) {
+function mailErrorText(error) {
+  const text = String(error || "");
+  if (!text) return "";
+  if (/confirmation token/i.test(text) && /expired|invalid/i.test(text)) {
+    return "确认令牌已过期或无效，请重新生成确认。";
+  }
+  try {
+    const payload = JSON.parse(text);
+    return payload?.error?.message || payload?.message || text;
+  } catch {
+    return text;
+  }
+}
+
+function canRetryMailDelivery(delivery) {
+  if (!delivery) return false;
+  if (delivery.status === "queued") return true;
+  if (delivery.status !== "failed") return false;
+  const error = String(delivery.error || "");
+  return /confirmation token|AGENT_MAIL|MAIL_/i.test(error);
+}
+
+function MailDeliveryList({ deliveries, onConfirmMailDelivery, onRetryMailDelivery, loading }) {
   const latest = [...(deliveries || [])]
     .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
     .slice(0, 8);
@@ -2189,7 +2275,7 @@ function MailDeliveryList({ deliveries, onConfirmMailDelivery, loading }) {
             {delivery.recipients?.length ? <span>To：{delivery.recipients.join(", ")}</span> : null}
             {delivery.cc?.length ? <span>CC：{delivery.cc.join(", ")}</span> : null}
             {delivery.attachments?.length ? <span>附件：{delivery.attachments.length} 个</span> : null}
-            {delivery.error ? <small>{delivery.error}</small> : null}
+            {delivery.error ? <small>{mailErrorText(delivery.error)}</small> : null}
           </div>
           {delivery.status === "pending_confirmation" ? (
             <button
@@ -2198,6 +2284,14 @@ function MailDeliveryList({ deliveries, onConfirmMailDelivery, loading }) {
               disabled={loading === `mail-confirm-${delivery.id}`}
             >
               确认发送
+            </button>
+          ) : canRetryMailDelivery(delivery) ? (
+            <button
+              type="button"
+              onClick={() => onRetryMailDelivery(delivery)}
+              disabled={loading === `mail-retry-${delivery.id}`}
+            >
+              重新生成确认
             </button>
           ) : null}
         </div>
@@ -2217,6 +2311,7 @@ function RunLogList({
   mailStatus,
   onBindMail,
   onConfirmMailDelivery,
+  onRetryMailDelivery,
   loading,
 }) {
   const sortedRuns = [...scanRuns].sort((a, b) => {
@@ -2248,7 +2343,12 @@ function RunLogList({
         ) : null}
       </div>
       <ActiveRunLogCard log={activeRunLog} runAnalyzeState={runAnalyzeState} />
-      <MailDeliveryList deliveries={mailDeliveries || []} onConfirmMailDelivery={onConfirmMailDelivery} loading={loading} />
+      <MailDeliveryList
+        deliveries={mailDeliveries || []}
+        onConfirmMailDelivery={onConfirmMailDelivery}
+        onRetryMailDelivery={onRetryMailDelivery}
+        loading={loading}
+      />
       <div className="run-list">
         {sortedRuns.length ? (
           sortedRuns.map((run) => {

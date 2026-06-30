@@ -7,6 +7,7 @@
 
 - 主入口 `/` 已从旧 Phase 1 工作台替换为文献阅读器主界面。
 - 旧 Web 路由 `/knowledge`、`/reports` 和旧 workbench 组件已从 `apps/web` 移除。
+- 独立文献阅读器 demo 已移除，旧入口不再作为项目入口。
 - 文献阅读器 UI 已迁入 Next.js：
   - `apps/web/components/literature-reader/literature-reader-app.tsx`
   - `apps/web/app/globals.css`
@@ -109,6 +110,14 @@ AGENT_MAIL_DEFAULT_RECIPIENTS=收件人邮箱
 邮件发送不是“绑定邮箱后自动成功”。绑定邮箱只是发送账号，任务还必须有收件人。  
 如果 CLI 返回确认令牌，状态会进入 `pending_confirmation`，前端点击确认后才会发送并进入 `sent`。
 
+2026-06-30 补充修复：
+
+- 采集任务表单中的“推送邮箱”已前置收件人输入；开启前必须填写合法 To 邮箱，CC/BCC 可选。
+- 前端和后端都会校验邮箱格式；非法地址不会保存任务。
+- 已绑定邮箱状态明确显示“来自本机 Agent Mail 授权缓存”；需要换账号时，前端提供“切换账号并重新扫码”，后端先执行 `agently-cli auth logout` 再启动新授权。
+- `ctk_xxx` 过期或无效时不再卡死为失败；确认接口会自动清空旧 token 并重新发起第一阶段投递，状态回到 `pending_confirmation`，前端显示“重新生成确认/确认发送”。
+- 旧失败记录可在邮箱推送记录中点击“重新生成确认”恢复，不需要重新执行采集任务。
+
 采集任务里的“每日自动执行”和“推送邮箱”已经拆成两个独立配置：
 
 - 每日自动执行：只决定任务是否按时间自动运行，后续需接 Redis + RQ/Celery worker。
@@ -127,7 +136,7 @@ sendCapable=false
 
 ## 5. 已知边界
 
-- `apps/literature-reader` 仍保留为迁移对照和初始 demo 数据源；正式验收稳定后再归档或删除。
+- 历史本地数据已从旧 demo 目录移入 `storage/literature/imported-local-data`；该目录属于运行数据，不纳入 git。
 - PostgreSQL 第一版通过 `rr_entities` JSONB 持久化，后续可拆分为关系表。
 - `LITERATURE_STORAGE_PROVIDER=s3` 已作为配置目标保留，本轮默认本地对象存储。
 - Redis + RQ/Celery 常驻调度器尚未落地；任务自动执行字段已进入正式任务模型。
@@ -154,5 +163,5 @@ sendCapable=false
    - 接入 Redis + RQ/Celery，把 `dailyEnabled/dailyTime/lastScheduledRunDate` 从字段状态升级为后台 worker。
    - worker 复用 `tasks/{id}:run` 的同一套扫描、去重、AI 分析和邮件投递逻辑。
 4. 存储归档：
-   - 将 `apps/literature-reader/local-data` 的 JSON 和文件资产迁入 PostgreSQL + `storage/literature` 或 S3。
-   - 主产品验收稳定后归档独立 demo，避免两套数据源长期并行。
+   - 将 `storage/literature/imported-local-data` 的 JSON 和文件资产迁入 PostgreSQL + 对象存储或 S3。
+   - 独立 demo 已删除，后续只维护 `apps/web` + `services/api`。

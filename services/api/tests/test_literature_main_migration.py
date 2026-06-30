@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from research_radar_api import literature
 from research_radar_api.main import app
 
 
@@ -97,6 +98,71 @@ def test_literature_mail_delivery_records_send_parameters() -> None:
     assert delivery["bodyFile"].endswith(".md")
     assert delivery["markdownPath"] == delivery["bodyFile"]
     assert isinstance(delivery.get("attachments"), list)
+
+
+def test_literature_task_rejects_invalid_recipient_email() -> None:
+    payload = {
+        "query": "nanomaterials plant",
+        "count": 2,
+        "yearFrom": 2021,
+        "minScore": 50,
+        "sources": ["openalex", "crossref"],
+        "downloadOpenPdf": False,
+        "autoAnalyze": False,
+        "dailyEnabled": False,
+        "dailyTime": "09:00",
+        "dailyTimezone": "Asia/Shanghai",
+        "notifyAfterRun": True,
+        "recipientEmails": ["not-an-email"],
+    }
+
+    response = client.post("/api/v1/literature/tasks", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_literature_expired_confirmation_regenerates_pending_token(monkeypatch) -> None:
+    monkeypatch.setattr(
+        literature,
+        "mail_status",
+        lambda: {
+            "enabled": True,
+            "installed": True,
+            "authorized": True,
+            "email": "sender@example.com",
+            "sendCapable": True,
+            "cli": "agently-cli",
+            "message": "ok",
+        },
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_agent_mail(args, cwd=None, timeout=45):  # noqa: ANN001, ARG001
+        calls.append(args)
+        if "--confirmation-token" in args:
+            return literature.CliResult(
+                1,
+                '{"ok": false, "error": {"type": "api_error", "code": 400, "message": "Confirmation token expired or invalid"}}',
+                "",
+            )
+        return literature.CliResult(8, "summary: 请确认发送\nctk_new_confirmation", "")
+
+    monkeypatch.setattr(literature, "run_agent_mail", fake_run_agent_mail)
+    delivery = literature.add_mail_delivery(
+        "mail_test",
+        {"id": "mail_test_expired", "title": "确认令牌刷新测试", "abstract": "test"},
+        task={"query": "mail retry"},
+        recipients=["recipient@example.com"],
+    )
+
+    response = client.post(f"/api/v1/literature/mail/deliveries/{delivery['id']}:confirm")
+
+    assert response.status_code == 200
+    refreshed = response.json()["delivery"]
+    assert refreshed["status"] == "pending_confirmation"
+    assert refreshed["confirmationToken"] == "ctk_new_confirmation"
+    assert any("--confirmation-token" in call for call in calls)
+    assert calls[-1].count("--confirmation-token") == 0
 
 
 def test_literature_file_route_serves_markdown() -> None:
