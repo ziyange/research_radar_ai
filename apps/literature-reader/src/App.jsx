@@ -42,43 +42,68 @@ const defaultScan = {
   notifyAfterRun: false,
 };
 
+async function parseApiResponse(response, fallbackMessage) {
+  const contentType = response.headers.get("content-type") || "";
+  const text = await response.text();
+  let data = null;
+  if (contentType.includes("json")) {
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error("本地 API 返回了无效 JSON");
+    }
+  } else if (text.trim().startsWith("{") || text.trim().startsWith("[")) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+  if (!data) {
+    const looksLikeHtml = /<!doctype|<html[\s>]/i.test(text);
+    throw new Error(
+      looksLikeHtml
+        ? "请求打到了页面而不是本地 API。请确认 literature-reader 后端服务已启动在 127.0.0.1:4177，或使用 npm run start:reader 打开。"
+        : fallbackMessage,
+    );
+  }
+  if (!response.ok) {
+    const error = new Error(data.message || data.run?.error || data.error || fallbackMessage);
+    error.retrieval = data.retrieval;
+    error.details = data;
+    throw error;
+  }
+  return data;
+}
+
 const api = {
   async getLibrary() {
     const response = await fetch("/api/library");
-    if (!response.ok) throw new Error("无法读取本地文献库");
-    return response.json();
+    return parseApiResponse(response, "无法读取本地文献库");
   },
   async getHealth() {
     const response = await fetch("/api/health");
-    if (!response.ok) throw new Error("本地服务未就绪");
-    return response.json();
+    return parseApiResponse(response, "本地服务未就绪");
   },
   async getTasks() {
     const response = await fetch("/api/tasks");
-    if (!response.ok) throw new Error("无法读取采集任务");
-    return response.json();
+    return parseApiResponse(response, "无法读取采集任务");
   },
   async getMailStatus() {
     const response = await fetch("/api/mail/status");
-    if (!response.ok) throw new Error("无法读取邮箱绑定状态");
-    return response.json();
+    return parseApiResponse(response, "无法读取邮箱绑定状态");
   },
   async startMailAuth() {
     const response = await fetch("/api/mail/auth/start", { method: "POST" });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || data.error || "启动邮箱授权失败");
-    return data;
+    return parseApiResponse(response, "启动邮箱授权失败");
   },
   async getMailOutbox() {
     const response = await fetch("/api/mail/outbox");
-    if (!response.ok) throw new Error("无法读取邮箱推送记录");
-    return response.json();
+    return parseApiResponse(response, "无法读取邮箱推送记录");
   },
   async confirmMailDelivery(id) {
     const response = await fetch(`/api/mail/deliveries/${encodeURIComponent(id)}/confirm`, { method: "POST" });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || data.error || "确认发送失败");
-    return data;
+    return parseApiResponse(response, "确认发送失败");
   },
   async createTask(payload) {
     const response = await fetch("/api/tasks", {
@@ -86,9 +111,7 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "创建任务失败");
-    return data;
+    return parseApiResponse(response, "创建任务失败");
   },
   async updateTask(id, payload) {
     const response = await fetch(`/api/tasks/${encodeURIComponent(id)}`, {
@@ -96,15 +119,11 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "更新任务失败");
-    return data;
+    return parseApiResponse(response, "更新任务失败");
   },
   async deleteTask(id) {
     const response = await fetch(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "删除任务失败");
-    return data;
+    return parseApiResponse(response, "删除任务失败");
   },
   async runTask(id) {
     const response = await fetch(`/api/tasks/${encodeURIComponent(id)}/run`, {
@@ -112,9 +131,7 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.run?.error || data.error || "执行任务失败");
-    return data;
+    return parseApiResponse(response, "执行任务失败");
   },
   async scan(payload) {
     const response = await fetch("/api/scan", {
@@ -122,9 +139,7 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "采集失败");
-    return data;
+    return parseApiResponse(response, "采集失败");
   },
   async analyze(payload) {
     const response = await fetch("/api/analyze", {
@@ -132,25 +147,15 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || data.error || "AI 分析失败");
-    return data;
+    return parseApiResponse(response, "AI 分析失败");
   },
   async deletePaper(id) {
     const response = await fetch(`/api/papers/${encodeURIComponent(id)}`, { method: "DELETE" });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "删除失败");
-    return data;
+    return parseApiResponse(response, "删除失败");
   },
   async fetchFullText(id) {
     const response = await fetch(`/api/papers/${encodeURIComponent(id)}/fetch-fulltext`, { method: "POST" });
-    const data = await response.json();
-    if (!response.ok) {
-      const error = new Error(data.message || data.error || "获取全文失败");
-      error.retrieval = data.retrieval;
-      throw error;
-    }
-    return data;
+    return parseApiResponse(response, "获取全文失败");
   },
   async uploadPdf(id, file) {
     const response = await fetch(`/api/papers/${encodeURIComponent(id)}/upload-pdf`, {
@@ -158,9 +163,7 @@ const api = {
       headers: { "Content-Type": "application/pdf" },
       body: file,
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || data.error || "上传 PDF 失败");
-    return data;
+    return parseApiResponse(response, "上传 PDF 失败");
   },
 };
 

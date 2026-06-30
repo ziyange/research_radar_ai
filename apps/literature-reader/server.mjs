@@ -701,6 +701,11 @@ function isBlockedOrErrorPage(html) {
     text.includes("there was a problem providing the content you requested") ||
     text.includes("just a moment") ||
     text.includes("access denied") ||
+    text.includes("you don't have permission to access") ||
+    text.includes("you don&#39;t have permission to access") ||
+    text.includes("errors.edgesuite.net") ||
+    text.includes("bm-verify=") ||
+    text.includes("akamai") ||
     text.includes("captcha") ||
     text.includes("tdm-reservation")
   );
@@ -719,7 +724,8 @@ function discoverRedirectUrls(html, baseUrl) {
   const urls = [];
   const source = String(html || "");
   for (const match of source.matchAll(/http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url=([^"']+)["']/gi)) {
-    urls.push(absoluteUrl(match[1], baseUrl));
+    const url = absoluteUrl(match[1], baseUrl);
+    if (!url.includes("bm-verify=")) urls.push(url);
   }
   for (const match of source.matchAll(/name=["']redirectURL["'][^>]+value=["']([^"']+)["']/gi)) {
     urls.push(absoluteUrl(decodeURIComponent(match[1]), baseUrl));
@@ -741,6 +747,34 @@ function discoverPdfUrls(html, baseUrl) {
     urls.push(absoluteUrl(match[1], baseUrl));
   }
   return uniqueStrings(urls).filter(isLikelyPdfUrl);
+}
+
+function mdpiArticleBaseUrl(value) {
+  const url = String(value || "").split("#")[0];
+  const match = url.match(/^https?:\/\/(?:www\.)?mdpi\.com\/([^?\s]+?)(?:\/(?:pdf|htm|xml))?(?:\?.*)?$/i);
+  if (!match) return "";
+  const pathPart = match[1].replace(/\/$/, "");
+  if (!/^\d{4}-\d{4}\/\d+\/\d+\/\d+/.test(pathPart)) return "";
+  return `https://www.mdpi.com/${pathPart}`;
+}
+
+function publisherDerivedUrls(...sources) {
+  const urls = [];
+  const rawUrls = sources
+    .filter(Boolean)
+    .flatMap((source) => [
+      source.pdfUrl,
+      source.landingPageUrl,
+      source.sourceUrl,
+      ...(source.pdfCandidates || []),
+      ...(source.landingCandidates || []),
+    ])
+    .filter(Boolean);
+  for (const url of rawUrls) {
+    const mdpiBase = mdpiArticleBaseUrl(url);
+    if (mdpiBase) urls.push(mdpiBase, `${mdpiBase}/htm`, `${mdpiBase}/xml`, `${mdpiBase}/pdf`);
+  }
+  return uniqueStrings(urls);
 }
 
 function fullTextMarkdown(paper, text, url) {
@@ -1251,7 +1285,37 @@ async function downloadPdfFromUrl(paper, pdfUrl, attempts = []) {
     const buffer = Buffer.from(await response.arrayBuffer());
     const isPdf = buffer.subarray(0, 4).toString("utf8") === "%PDF";
     if (!isPdf) {
-      attempts.push({ type: "pdf", url: pdfUrl, status: response.status, ok: false, reason: "NOT_PDF" });
+      const contentType = response.headers.get("content-type") || "";
+      const text = contentType.includes("html") || buffer.length < 8000
+        ? buffer.toString("utf8", 0, Math.min(buffer.length, 12000))
+        : "";
+      if (text && isBlockedOrErrorPage(text)) {
+        attempts.push({
+          type: "pdf",
+          url: pdfUrl,
+          status: response.status,
+          ok: false,
+          reason: "PUBLISHER_BLOCKED_SERVER_FETCH",
+        });
+        return null;
+      }
+      if (text) {
+        for (const discovered of discoverPdfUrls(text, pdfUrl)) {
+          if (discovered && discovered !== pdfUrl) {
+            const nested = await downloadPdfFromUrl(paper, discovered, attempts);
+            if (nested) return nested;
+          }
+        }
+      }
+      attempts.push({
+        type: "pdf",
+        url: pdfUrl,
+        status: response.status,
+        ok: false,
+        reason: "NOT_PDF",
+        contentType,
+        bytes: buffer.length,
+      });
       return null;
     }
     const fileName = `${paper.id}.pdf`;
@@ -1321,16 +1385,19 @@ async function fetchUnpaywallByDoi(doi) {
 }
 
 function mergePaperLinks(paper, ...sources) {
+  const publisherUrls = publisherDerivedUrls(paper, ...sources);
   const pdfCandidates = uniqueStrings([
     paper.pdfUrl,
     ...(paper.pdfCandidates || []),
     ...sources.flatMap((source) => [source.pdfUrl, ...(source.pdfCandidates || [])]),
+    ...publisherUrls.filter(isLikelyPdfUrl),
   ].filter(isLikelyPdfUrl));
   const landingCandidates = uniqueStrings([
     paper.landingPageUrl,
     paper.sourceUrl,
     doiUrl(paper.doi),
     ...(paper.landingCandidates || []),
+    ...publisherUrls.filter((url) => !isLikelyPdfUrl(url)),
     ...sources.flatMap((source) => [
       source.landingPageUrl,
       source.sourceUrl,
@@ -1387,19 +1454,28 @@ async function fetchOpenFullText(paper, attempts = []) {
           Accept: "text/html,application/xhtml+xml",
         },
       });
+      const finalUrl = response.url || url;
+      if (finalUrl && finalUrl !== url && !visited.has(finalUrl)) queue.push(finalUrl);
       if (!response.ok) {
-        attempts.push({ type: "html", url, status: response.status, ok: false, reason: "HTTP_ERROR" });
+        attempts.push({ type: "html", url, finalUrl, status: response.status, ok: false, reason: "HTTP_ERROR" });
         continue;
       }
       const contentType = response.headers.get("content-type") || "";
       if (!contentType.includes("html")) continue;
       const html = await response.text();
+      if (isBlockedOrErrorPage(html)) {
+        attempts.push({
+          type: "html",
+          url,
+          finalUrl,
+          status: response.status,
+          ok: false,
+          reason: "PUBLISHER_BLOCKED_SERVER_FETCH",
+        });
+        continue;
+      }
       for (const discovered of discoverRedirectUrls(html, url)) {
         if (!visited.has(discovered)) queue.push(discovered);
-      }
-      if (isBlockedOrErrorPage(html)) {
-        attempts.push({ type: "html", url, status: response.status, ok: false, reason: "BLOCKED_OR_ERROR_PAGE" });
-        continue;
       }
       for (const pdfUrl of discoverPdfUrls(html, url)) {
         const localPdfPath = await downloadPdfFromUrl(paper, pdfUrl, attempts);
@@ -1407,12 +1483,12 @@ async function fetchOpenFullText(paper, attempts = []) {
       }
       const text = await polishFullTextMarkdownLayout(htmlToStructuredMarkdown(html, url), paper);
       if (text.length < 3000) {
-        attempts.push({ type: "html", url, status: response.status, ok: false, reason: "TOO_SHORT", chars: text.length });
+        attempts.push({ type: "html", url, finalUrl, status: response.status, ok: false, reason: "TOO_SHORT", chars: text.length });
         continue;
       }
       const target = path.join(papersDir, `${slug(paper.title || paper.id)}-${paper.id}-fulltext.md`);
-      await writeFile(target, fullTextMarkdown(paper, text, url), "utf8");
-      attempts.push({ type: "html", url, status: response.status, ok: true, chars: text.length });
+      await writeFile(target, fullTextMarkdown(paper, text, finalUrl), "utf8");
+      attempts.push({ type: "html", url, finalUrl, status: response.status, ok: true, chars: text.length });
       return { localFullTextPath: path.relative(__dirname, target).replace(/\\/g, "/"), localPdfPath: null, pdfUrl: "" };
     } catch {
       attempts.push({ type: "html", url, ok: false, reason: "FETCH_FAILED" });
@@ -2110,9 +2186,14 @@ async function handleFetchFullText(id, response) {
   }
   const refreshed = await refreshPaperReadableAssets(paper);
   if (!refreshed.paper.localPdfPath && !refreshed.paper.localFullTextPath) {
+    const publisherBlocked = (refreshed.retrieval?.attempts || []).some((attempt) =>
+      ["PUBLISHER_BLOCKED_SERVER_FETCH", "BLOCKED_OR_ERROR_PAGE"].includes(attempt.reason)
+    );
     return sendJson(response, 404, {
-      error: "FULL_TEXT_NOT_AVAILABLE",
-      message: "已访问 DOI/来源页，但未发现可合法下载的 PDF 或足够长度的公开正文",
+      error: publisherBlocked ? "PUBLISHER_BLOCKED_SERVER_FETCH" : "FULL_TEXT_NOT_AVAILABLE",
+      message: publisherBlocked
+        ? "发布商页面可在浏览器打开，但拒绝本地服务端自动获取。请点击 DOI/来源页面下载 PDF 后，在右侧上传本地 PDF。"
+        : "已访问 DOI/来源页，但未发现可合法下载的 PDF 或足够长度的公开正文",
       retrieval: refreshed.retrieval,
     });
   }
