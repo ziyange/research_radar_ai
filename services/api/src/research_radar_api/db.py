@@ -136,3 +136,14 @@ class EntityPersistence:
                     (entity_type, entity_id, json.dumps(payload)),
                 )
             connection.commit()
+
+    def delete(self, entity_type: str, entity_id: str) -> None:
+        if not self.enabled or self._psycopg is None:
+            return
+        with self._psycopg.connect(psycopg_url(self.database_url)) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM rr_entities WHERE entity_type = %s AND id = %s",
+                    (entity_type, entity_id),
+                )
+            connection.commit()

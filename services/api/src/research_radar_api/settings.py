@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     cnki_api_base_url: str | None = None
     cnki_api_key: str | None = None
 
-    email_provider: Literal["mock", "smtp", "api"] = "mock"
+    email_provider: Literal["mock", "smtp", "api", "agent_mail"] = "mock"
     email_from: str = "Research Radar AI <no-reply@research-radar.local>"
     smtp_host: str | None = None
     smtp_port: int = 587
@@ -49,10 +49,23 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_use_tls: bool = True
     email_mock_force_failure: bool = False
+    agent_mail_enabled: bool = False
+    agent_mail_cli: str = "agently-cli"
+    agent_mail_default_recipients: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    literature_scheduler_enabled: bool = False
+    literature_storage_provider: Literal["local", "s3"] = "local"
+    literature_storage_root: str = "storage/literature"
 
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("agent_mail_default_recipients", mode="before")
+    @classmethod
+    def parse_agent_mail_default_recipients(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value

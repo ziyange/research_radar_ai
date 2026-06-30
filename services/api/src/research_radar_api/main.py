@@ -19,6 +19,7 @@ from .ai import (
 )
 from .agent_scan import AgentScanRequest, StandaloneResearchScanAgent
 from .db import database_health
+from .literature import router as literature_router
 from .notifications import publish_report_notifications
 from .retrieval import (
     CrossrefAdapter,
@@ -106,6 +107,7 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+app.include_router(literature_router)
 
 
 def envelope(request: Request, data: Any) -> dict[str, Any]:

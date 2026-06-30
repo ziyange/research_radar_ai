@@ -1,5 +1,5 @@
-import { PhaseOneWorkbench } from "../components/phase-one-workbench";
+import { App as LiteratureReaderApp } from "../components/literature-reader/literature-reader-app";
 
 export default function Home() {
-  return <PhaseOneWorkbench />;
+  return <LiteratureReaderApp />;
 }

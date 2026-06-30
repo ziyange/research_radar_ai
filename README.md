@@ -2,9 +2,9 @@
 
 AI 科研情报、知识管理与课题推进平台。
 
-当前实现遵循 `docs/` 文档基线，优先落地 MVP 推荐闭环：
+当前主产品已按 `docs/RR-MAIN-001-literature-reader-migration.md` 迁移为文献阅读器：
 
-`研究画像生成 -> 检索规划 -> 开放数据源检索 -> 跨源排重 -> 个性化推荐 -> AI 快速分析 -> 用户反馈 -> 推荐纠偏 -> 日报/周报触达`
+`采集任务 -> OpenAlex/Crossref 检索 -> 去重入库 -> 本地文献库知识图谱 -> 文献原文/PDF -> AI Markdown 分析报告 -> Agent Mail 推送`
 
 ## 本地 Python 环境
 
@@ -40,6 +40,7 @@ uv sync --dev
 - `DEV_USER_ID`
 - `X_MOL_API_BASE_URL`
 - `CNKI_API_BASE_URL`
+- `AGENT_MAIL_DEFAULT_RECIPIENTS`
 
 默认 `AI_PROVIDER=mock`，不会调用真实 AI API。要接入阿里云百炼，使用 OpenAI-compatible 模式，不需要新增 `DASHSCOPE_*` 变量：
 
@@ -57,6 +58,41 @@ AGENT_AI_ANALYSIS_CONCURRENCY=2
 `DEMO_SEED_ENABLED=false` 是真实业务默认值，不会初始化 demo 论文。开发演示或本地 smoke flow 可显式改为 `true`。`DEV_USER_ID=usr_demo` 仅用于开发环境免登录；生产环境应接入正式认证，不依赖该值。
 
 Phase 1 默认验收全部使用 mock AI，不需要也不读取真实 OpenAI Key。
+
+### 文献阅读器主产品配置
+
+主前端为 Next.js，主后端为 FastAPI。Next.js 会把浏览器侧 `/api/v1/*` 请求代理到：
+
+```text
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8010/api/v1
+```
+
+文献阅读器正式接口位于：
+
+```text
+GET http://127.0.0.1:8010/api/v1/literature/health
+GET http://127.0.0.1:8010/api/v1/literature/library
+```
+
+首次启动 FastAPI 时，会从 `apps/literature-reader/local-data/` 导入 demo 已有文献、报告、采集记录和任务，再写入 PostgreSQL `rr_entities` 或内存开发存储。
+
+Agent Mail 中“绑定邮箱”是发送账号，不是收件人。推送邮件必须配置收件人：
+
+```text
+EMAIL_PROVIDER=agent_mail
+AGENT_MAIL_ENABLED=true
+AGENT_MAIL_CLI=agently-cli
+AGENT_MAIL_DEFAULT_RECIPIENTS=reader@example.com
+```
+
+采集任务表单开启“推送邮箱”后，需要填写收件人 To；CC/BCC 可选。邮件参数映射为：
+
+- `to`：任务级收件人或 `AGENT_MAIL_DEFAULT_RECIPIENTS`
+- `subject`：系统按每篇论文自动生成 `[研知雷达] 完整文献 · {标题}` 或 `[研知雷达] AI分析 · {标题}`
+- `body_file`：生成的 Markdown 文件，完整文献包含文献信息、摘要、链接和本地原文/解析；AI 任务包含单篇 AI 报告
+- `attachment`：最多 3 个，第一版优先附带本地 PDF
+
+邮件发送遵循 Agent Mail 两阶段确认：任务完成后会自动发起投递；若 CLI 返回 `ctk_xxx`，状态先进入 `pending_confirmation`，前端点击确认后才会带 `confirmation-token` 完成发送。
 
 ### Agent 来源配置
 
@@ -149,6 +185,8 @@ npm run dev:web
 ```text
 http://localhost:3000
 ```
+
+当前 `/` 直接进入文献阅读器主界面。旧 Phase 1 工作台、`/knowledge`、`/reports` 页面已经从主 Web 移除；独立 `apps/literature-reader` 仅作为迁移对照保留。
 
 ## Phase 1 本地总验收
 
