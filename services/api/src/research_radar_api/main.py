@@ -117,7 +117,7 @@ def envelope(request: Request, data: Any) -> dict[str, Any]:
 def current_user(request: Request) -> User:
     settings = get_settings()
     user_id = request.headers.get("x-user-id")
-    if not user_id and settings.app_env == "development":
+    if not user_id and settings.app_env in ("development", "test"):
         user_id = settings.dev_user_id
     if not user_id:
         raise HTTPException(status_code=401, detail="AUTH_REQUIRED")
