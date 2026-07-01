@@ -952,8 +952,11 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
                         digest_reports.append(report)
             else:
                 digest_papers = list(result["papers"])
-            delivery = add_task_digest_delivery(task, result["run"], digest_papers, digest_reports)
-            result["taskDigestDelivery"] = delivery
+            if digest_papers:
+                delivery = add_task_digest_delivery(task, result["run"], digest_papers, digest_reports)
+                result["taskDigestDelivery"] = delivery
+            else:
+                result["taskDigestDelivery"] = None
         repository._persist_item("tasks", task)
         result["tasks"] = repository.tasks
         result["mailDeliveries"] = repository.serialize_library()["mailDeliveries"]

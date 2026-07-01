@@ -358,10 +358,18 @@ export function App() {
           { key: "search", status: "done", text: `公开数据源检索完成，候选 ${data.run.candidateCount || 0} 篇。` },
           { key: "save", status: "done", text: `完成：保存 ${data.run.savedCount || 0} 篇，去重 ${data.run.duplicateCount || 0} 篇。` },
           ...(task.autoAnalyze
-            ? [{ key: "analysis", status: "done", text: "AI 分析已由后端逐篇处理并落盘。" }]
+            ? [
+                data.run.savedCount > 0
+                  ? { key: "analysis", status: "done", text: "AI 分析已由后端逐篇处理并落盘。" }
+                  : { key: "analysis", status: "skipped", text: "未保存新文献，已跳过 AI 分析。" },
+              ]
             : []),
           ...(pushReady
-            ? [{ key: "mail", status: "done", text: data.taskDigestDelivery ? "任务汇总邮件已生成。" : "邮箱推送未生成。" }]
+            ? [
+                data.taskDigestDelivery
+                  ? { key: "mail", status: "done", text: "任务汇总邮件已生成。" }
+                  : { key: "mail", status: "skipped", text: "没有新文献，未生成任务邮件。" },
+              ]
             : []),
         ],
       });

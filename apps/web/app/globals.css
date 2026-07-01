@@ -2865,6 +2865,19 @@ input {
   background: #d97706;
 }
 
+.active-step.skipped {
+  background: #f8faf9;
+}
+
+.active-step.skipped span {
+  color: #6b7671;
+  background: #e8eeeb;
+}
+
+.active-step.skipped p {
+  color: #66736e;
+}
+
 .active-run-message {
   margin: 0;
   padding: 8px 10px;

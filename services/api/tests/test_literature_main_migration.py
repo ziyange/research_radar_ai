@@ -140,6 +140,17 @@ def test_literature_scan_degrades_when_openalex_fails(monkeypatch) -> None:
     assert any(item.get("errorType") == "service_unavailable" for item in run["sourceStatuses"])
 
 
+def test_literature_cjk_query_keeps_provider_ranked_english_records() -> None:
+    paper = {
+        "title": "Nanomaterials improve plant stress tolerance",
+        "doi": "10.0000/nano-plant",
+        "abstract": "Nanoparticles and nanomaterials regulate plant growth under abiotic stress.",
+        "keywords": ["nanomaterials", "plants"],
+    }
+
+    assert literature.relevant_enough(paper, "纳米材料 植物") is True
+
+
 def test_literature_mock_analysis_generates_markdown_report() -> None:
     paper = add_fulltext_test_paper()
     paper_id = paper["id"]
@@ -373,6 +384,77 @@ def test_literature_run_disables_legacy_push_task_without_recipient(monkeypatch)
     assert response.status_code == 200
     assert response.json()["tasks"][0]["notifyAfterRun"] is False
     assert response.json()["mailDeliveries"] == literature.repository.serialize_library()["mailDeliveries"]
+
+
+def test_literature_task_push_skips_digest_when_no_new_papers(monkeypatch) -> None:
+    task = {
+        "id": "task_digest_empty_result",
+        "query": "纳米材料 植物",
+        "count": 5,
+        "yearFrom": 2021,
+        "minScore": 70,
+        "sources": ["openalex", "crossref"],
+        "downloadOpenPdf": False,
+        "autoAnalyze": True,
+        "dailyEnabled": False,
+        "dailyTime": "09:00",
+        "dailyTimezone": "Asia/Shanghai",
+        "notifyAfterRun": True,
+        "recipientEmails": ["recipient@example.com"],
+        "ccEmails": [],
+        "bccEmails": [],
+    }
+    literature.repository.tasks = [task, *[item for item in literature.repository.tasks if item["id"] != task["id"]]]
+    literature.repository._persist_item("tasks", task)
+    before = [
+        item["id"]
+        for item in literature.repository.serialize_library()["mailDeliveries"]
+        if item.get("taskId") == task["id"]
+    ]
+
+    async def fake_perform_scan(payload, task_id=None, trigger="manual"):  # noqa: ANN001, ARG001
+        return {
+            "run": {
+                "id": "scan_empty_digest",
+                "taskId": task_id,
+                "query": payload["query"],
+                "count": payload["count"],
+                "yearFrom": payload["yearFrom"],
+                "minScore": payload["minScore"],
+                "sources": payload["sources"],
+                "queryPlan": [{"query": payload["query"], "source": "user"}],
+                "sourceStatuses": [
+                    {"source": "crossref", "query": payload["query"], "status": "succeeded", "count": 295}
+                ],
+                "sourceSummary": {"succeeded_count": 1, "failed_count": 0, "degraded": False},
+                "candidateCount": 0,
+                "uniqueCount": 0,
+                "duplicateCount": 0,
+                "savedPaperIds": [],
+                "savedCount": 0,
+                "targetMet": False,
+                "exhaustedReason": "没有找到满足评分、时间和去重条件的新文献",
+                "createdAt": "2026-01-01T00:00:00+00:00",
+            },
+            "papers": [],
+            "duplicates": [],
+            "library": literature.repository.serialize_library(),
+        }
+
+    monkeypatch.setattr(literature, "perform_scan", fake_perform_scan)
+
+    response = client.post(f"/api/v1/literature/tasks/{task['id']}:run", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run"]["savedCount"] == 0
+    assert payload["taskDigestDelivery"] is None
+    after = [
+        item["id"]
+        for item in payload["mailDeliveries"]
+        if item.get("taskId") == task["id"]
+    ]
+    assert after == before
 
 
 def test_literature_task_push_creates_single_digest_with_zip_attachments(monkeypatch) -> None:

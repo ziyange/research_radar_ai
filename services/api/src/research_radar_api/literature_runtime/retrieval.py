@@ -130,6 +130,14 @@ def relevant_enough(paper: dict[str, Any], query: str) -> bool:
     terms = query_terms(query)
     if not terms:
         return True
+    # Open metadata providers may return English records for Chinese queries.
+    # When no English expansion is available, keep provider-ranked records and
+    # let score/year/dedupe filters decide instead of requiring impossible CJK
+    # term matches inside English titles or abstracts.
+    has_cjk_query = bool(re.search(r"[\u4e00-\u9fff]", query))
+    has_latin_term = any(re.search(r"[a-zA-Z]", term) for term in terms)
+    if has_cjk_query and not has_latin_term:
+        return bool(paper.get("title") and (paper.get("abstract") or paper.get("doi")))
     text = " ".join(
         [
             str(paper.get("title") or ""),
