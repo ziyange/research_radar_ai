@@ -92,6 +92,8 @@ AI_REQUEST_TIMEOUT_SECONDS=90
 AGENT_AI_ANALYSIS_CONCURRENCY=2
 ```
 
+> **注意**：请务必将 `OPENAI_BASE_URL` 中的 `{WorkspaceId}` 替换为您在阿里云百炼中真实的**工作空间 ID**。
+
 `AI_PROVIDER=openai` 时如果缺少 key、base URL 或 model，接口会返回 `AI_PROVIDER_CONFIG_MISSING`，不会静默回退 mock。
 
 `DEMO_SEED_ENABLED=false` 是真实业务默认值，不会初始化 demo 论文。开发演示或本地 smoke flow 可显式改为 `true`。`DEV_USER_ID=usr_demo` 仅用于开发环境免登录；生产环境应接入正式认证，不依赖该值。
