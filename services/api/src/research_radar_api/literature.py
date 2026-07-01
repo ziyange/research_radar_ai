@@ -408,7 +408,7 @@ def attempt_mail_delivery(delivery_id: str, confirmation_token: str = "") -> dic
             status="pending_confirmation",
             confirmationToken=token,
             confirmationSummary=summary,
-            error="AGENT_MAIL_CONFIRMATION_REQUIRED",
+            error="",
         )
     else:
         if confirmation_token and confirmation_token_invalid(output):

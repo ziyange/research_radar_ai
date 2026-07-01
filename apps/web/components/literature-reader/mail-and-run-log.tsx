@@ -149,6 +149,9 @@ export function mailStatusText(status) {
 function mailErrorText(error) {
   const text = String(error || "");
   if (!text) return "";
+  if (text === "AGENT_MAIL_CONFIRMATION_REQUIRED") {
+    return "等待确认发送，请点击右侧“确认发送”完成投递。";
+  }
   if (text === "MAIL_RECIPIENT_REQUIRED") {
     return "缺少收件人 To，请编辑采集任务并填写有效邮箱。";
   }
@@ -193,6 +196,9 @@ function MailDeliveryList({ deliveries, onConfirmMailDelivery, onRetryMailDelive
             {delivery.recipients?.length ? <span>To：{delivery.recipients.join(", ")}</span> : null}
             {delivery.cc?.length ? <span>CC：{delivery.cc.join(", ")}</span> : null}
             {delivery.attachments?.length ? <span>附件：{delivery.attachments.length} 个</span> : null}
+            {delivery.status === "pending_confirmation" ? (
+              <small>{delivery.confirmationSummary || "等待确认发送，请点击右侧“确认发送”完成投递。"}</small>
+            ) : null}
             {delivery.error ? <small>{mailErrorText(delivery.error)}</small> : null}
           </div>
           {delivery.status === "pending_confirmation" ? (
