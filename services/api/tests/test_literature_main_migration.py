@@ -101,6 +101,23 @@ def test_literature_mail_delivery_records_send_parameters() -> None:
     assert isinstance(delivery.get("attachments"), list)
 
 
+def test_literature_confirmation_summary_object_is_formatted() -> None:
+    output = (
+        '{"confirmation_token":"ctk_object_summary",'
+        '"summary":{"action":"send","attachment_count":2,'
+        '"from":"sender@example.com","subject":"文献推送",'
+        '"to":["recipient@example.com"]}}'
+    )
+
+    token, summary = literature.extract_confirmation(output)
+
+    assert token == "ctk_object_summary"
+    assert "动作：send" in summary
+    assert "To：recipient@example.com" in summary
+    assert "主题：文献推送" in summary
+    assert "附件：2 个" in summary
+
+
 def test_literature_task_rejects_invalid_recipient_email() -> None:
     payload = {
         "query": "nanomaterials plant",

@@ -166,6 +166,44 @@ function mailErrorText(error) {
   }
 }
 
+function compactList(value) {
+  if (!value) return "";
+  if (Array.isArray(value)) return value.filter(Boolean).join(", ");
+  return String(value);
+}
+
+function objectSummaryText(value) {
+  if (!value || typeof value !== "object") return "";
+  const parts = [
+    value.action ? `动作：${value.action}` : "",
+    value.from ? `From：${value.from}` : "",
+    value.to ? `To：${compactList(value.to)}` : "",
+    value.subject ? `主题：${value.subject}` : "",
+    value.attachment_count !== undefined ? `附件：${value.attachment_count} 个` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : JSON.stringify(value);
+}
+
+function mailConfirmationSummaryText(summary) {
+  if (!summary) return "";
+  if (typeof summary === "string") {
+    const text = summary.trim();
+    if (!text) return "";
+    if (text.startsWith("{") || text.startsWith("[")) {
+      try {
+        return mailConfirmationSummaryText(JSON.parse(text));
+      } catch {
+        return text;
+      }
+    }
+    return text;
+  }
+  if (Array.isArray(summary)) {
+    return summary.map(mailConfirmationSummaryText).filter(Boolean).join("；");
+  }
+  return objectSummaryText(summary);
+}
+
 function canRetryMailDelivery(delivery) {
   if (!delivery) return false;
   if (delivery.error === "MAIL_RECIPIENT_REQUIRED") return false;
@@ -205,7 +243,7 @@ function MailDeliveryList({ deliveries, onConfirmMailDelivery, onConfirmPendingM
             {delivery.cc?.length ? <span>CC：{delivery.cc.join(", ")}</span> : null}
             {delivery.attachments?.length ? <span>附件：{delivery.attachments.length} 个</span> : null}
             {delivery.status === "pending_confirmation" ? (
-              <small>{delivery.confirmationSummary || "等待确认发送，请点击右侧“确认发送”完成投递。"}</small>
+              <small>{mailConfirmationSummaryText(delivery.confirmationSummary) || "等待确认发送，请点击右侧“确认发送”完成投递。"}</small>
             ) : null}
             {delivery.error ? <small>{mailErrorText(delivery.error)}</small> : null}
           </div>

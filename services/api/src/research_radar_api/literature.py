@@ -188,8 +188,44 @@ def parse_cli_json(output: str) -> dict[str, Any] | None:
         return None
 
 
+def format_confirmation_summary(summary: Any) -> str:
+    if not summary:
+        return ""
+    if isinstance(summary, str):
+        return summary
+    if isinstance(summary, list):
+        return "；".join(
+            item for item in (format_confirmation_summary(part) for part in summary) if item
+        )
+    if isinstance(summary, dict):
+        to_value = summary.get("to")
+        to_text = ", ".join(str(item) for item in to_value) if isinstance(to_value, list) else str(to_value or "")
+        parts = [
+            f"动作：{summary['action']}" if summary.get("action") else "",
+            f"From：{summary['from']}" if summary.get("from") else "",
+            f"To：{to_text}" if to_text else "",
+            f"主题：{summary['subject']}" if summary.get("subject") else "",
+            f"附件：{summary['attachment_count']} 个"
+            if summary.get("attachment_count") is not None
+            else "",
+        ]
+        text = " · ".join(part for part in parts if part)
+        return text or json.dumps(summary, ensure_ascii=False)
+    return str(summary)
+
+
 def extract_confirmation(output: str) -> tuple[str, str]:
     token = re.search(r"ctk_[A-Za-z0-9_\-]+", output or "")
+    payload = parse_cli_json(output) or {}
+    summary = (
+        payload.get("summary")
+        or payload.get("data", {}).get("summary")
+        or payload.get("confirmation", {}).get("summary")
+        or payload.get("data", {}).get("confirmation", {}).get("summary")
+    )
+    summary_text = format_confirmation_summary(summary)
+    if summary_text:
+        return (token.group(0) if token else "", summary_text)
     summary_match = re.search(r"summary[\"']?\s*[:：]\s*[\"']?([^\"'\n]+)", output or "")
     return (token.group(0) if token else "", summary_match.group(1) if summary_match else output[:1200])
 
