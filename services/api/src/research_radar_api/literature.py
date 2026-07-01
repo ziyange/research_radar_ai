@@ -234,6 +234,7 @@ def mail_status() -> dict[str, Any]:
         "email": email,
         "sendCapable": bool(result.code == 0 and email),
         "provider": "agent_mail",
+        "autoConfirm": bool(getattr(settings, "agent_mail_auto_confirm", False)),
         "cli": cli,
         "message": "ok" if result.code == 0 else (result.stderr or result.stdout or "Agent Mail 未授权"),
     }
@@ -482,6 +483,10 @@ def attempt_mail_delivery(delivery_id: str, confirmation_token: str = "") -> dic
             confirmationSummary=summary,
             error="",
         )
+        if getattr(get_settings(), "agent_mail_auto_confirm", False) and not confirmation_token:
+            repository.library["mailDeliveries"][index] = delivery
+            repository._persist_item("mailDeliveries", delivery)
+            return attempt_mail_delivery(delivery_id, token)
     else:
         if confirmation_token and confirmation_token_invalid(output):
             delivery.update(

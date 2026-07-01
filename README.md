@@ -88,12 +88,13 @@ SMTP_PASSWORD=your-smtp-password-or-app-password
 SMTP_USE_TLS=true
 ```
 
-Agent Mail 仍可用于手动/调试投递。“绑定邮箱”是发送账号，不是收件人。推送邮件必须配置收件人：
+Agent Mail 也可作为产品自动化通道使用。“绑定邮箱”是发送账号，不是收件人。推送邮件必须配置收件人，并开启自动确认：
 
 ```text
 EMAIL_PROVIDER=agent_mail
 AGENT_MAIL_ENABLED=true
 AGENT_MAIL_CLI=agently-cli
+AGENT_MAIL_AUTO_CONFIRM=true
 AGENT_MAIL_DEFAULT_RECIPIENTS=reader@example.com
 ```
 
@@ -104,7 +105,7 @@ AGENT_MAIL_DEFAULT_RECIPIENTS=reader@example.com
 - `body_file`：生成的 Markdown 文件，完整文献包含文献信息、摘要、链接和本地原文/解析；AI 任务包含单篇 AI 报告
 - `attachment`：最多 3 个，第一版优先附带本地 PDF
 
-`EMAIL_PROVIDER=smtp` 时，任务完成后会直接自动发送，不需要人工确认。`EMAIL_PROVIDER=agent_mail` 时，发送遵循 Agent Mail 两阶段确认：任务完成后会自动发起投递；若 CLI 返回 `ctk_xxx`，状态先进入 `pending_confirmation`，前端点击确认后才会带 `confirmation-token` 完成发送。
+`EMAIL_PROVIDER=smtp` 时，任务完成后会直接自动发送，不需要人工确认。`EMAIL_PROVIDER=agent_mail` 且 `AGENT_MAIL_AUTO_CONFIRM=true` 时，任务完成后会自动发起投递，若 CLI 返回 `ctk_xxx`，后端会立即带 `confirmation-token` 完成第二次发送。`AGENT_MAIL_AUTO_CONFIRM=false` 时，仍保留前端人工确认流程。
 
 ### Agent 来源配置
 

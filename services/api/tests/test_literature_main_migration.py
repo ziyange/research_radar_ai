@@ -252,6 +252,53 @@ def test_literature_confirms_all_pending_deliveries(monkeypatch) -> None:
     assert all("--confirmation-token" in call for call in calls[-2:])
 
 
+def test_literature_agent_mail_auto_confirms_token(monkeypatch) -> None:
+    monkeypatch.setattr(
+        literature,
+        "mail_status",
+        lambda: {
+            "enabled": True,
+            "installed": True,
+            "authorized": True,
+            "email": "sender@example.com",
+            "sendCapable": True,
+            "provider": "agent_mail",
+            "cli": "agently-cli",
+            "message": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        literature,
+        "get_settings",
+        lambda: SimpleNamespace(
+            agent_mail_auto_confirm=True,
+            agent_mail_default_recipients=[],
+        ),
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_agent_mail(args, cwd=None, timeout=45):  # noqa: ANN001, ARG001
+        calls.append(args)
+        if "--confirmation-token" in args:
+            return literature.CliResult(0, '{"data": {"message_id": "msg_auto_sent"}}', "")
+        return literature.CliResult(8, "summary: 请确认发送\nctk_auto_confirm", "")
+
+    monkeypatch.setattr(literature, "run_agent_mail", fake_run_agent_mail)
+
+    delivery = literature.add_mail_delivery(
+        "mail_test",
+        {"id": "mail_test_auto_confirm", "title": "Agent Mail 自动确认测试", "abstract": "test"},
+        task={"query": "agent mail auto"},
+        recipients=["recipient@example.com"],
+    )
+
+    assert delivery["status"] == "sent"
+    assert delivery["providerMessageId"] == "msg_auto_sent"
+    assert len(calls) == 2
+    assert "--confirmation-token" not in calls[0]
+    assert "--confirmation-token" in calls[1]
+
+
 def test_literature_smtp_delivery_sends_without_confirmation(monkeypatch) -> None:
     sent: list[object] = []
 

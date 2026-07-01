@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     email_mock_force_failure: bool = False
     agent_mail_enabled: bool = False
     agent_mail_cli: str = "agently-cli"
+    agent_mail_auto_confirm: bool = False
     agent_mail_default_recipients: Annotated[list[str], NoDecode] = Field(default_factory=list)
     literature_scheduler_enabled: bool = False
     literature_storage_provider: Literal["local", "s3"] = "local"
