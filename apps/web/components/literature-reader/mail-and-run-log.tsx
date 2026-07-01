@@ -20,7 +20,7 @@ function formatRunTime(iso) {
   }
 }
 
-export function MailBindModal({ mailStatus, loading, onClose, onBind, onRebind, onRefresh }) {
+export function MailBindModal({ mailStatus, authUrl, loading, onClose, onBind, onRebind, onOpenAuthUrl, onRefresh }) {
   const bound = Boolean(mailStatus?.authorized && mailStatus.email);
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -41,6 +41,11 @@ export function MailBindModal({ mailStatus, loading, onClose, onBind, onRebind, 
             <p className="modal-hint">
               如果这里已经显示账号，说明本机 CLI 之前保存过授权。需要换账号时请点击“切换账号并重新扫码”，系统会先清除旧凭据，再打开 Agent Mail 授权页面。完成扫码后回到这里刷新状态。
             </p>
+            {authUrl ? (
+              <button type="button" className="btn-ghost" onClick={onOpenAuthUrl}>
+                手动打开授权页
+              </button>
+            ) : null}
           </div>
         </div>
         <div className="modal-footer">

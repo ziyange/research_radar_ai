@@ -64,6 +64,7 @@ export function App() {
   const [error, setError] = useState("");
   const [taskModal, setTaskModal] = useState(null);
   const [mailBindModal, setMailBindModal] = useState(false);
+  const [mailAuthUrl, setMailAuthUrl] = useState("");
   const [expandedRunIds, setExpandedRunIds] = useState({});
   const [runAnalyzeState, setRunAnalyzeState] = useState({});
   const [activeRunLog, setActiveRunLog] = useState(null);
@@ -186,8 +187,8 @@ export function App() {
       }
       const data = await api.startMailAuth();
       if (data.authUrl) {
-        window.open(data.authUrl, "_blank", "noopener,noreferrer");
-        setStatus({ tone: "running", message: "已打开 Agent Mail 授权页面，请完成二维码登录后再刷新状态" });
+        setMailAuthUrl(data.authUrl);
+        setStatus({ tone: "running", message: "Agent Mail 授权已启动；如浏览器未自动打开，请在弹窗中手动打开授权页" });
       }
       window.setTimeout(() => refresh().catch(() => null), 4000);
       window.setTimeout(() => refresh().catch(() => null), 12000);
@@ -896,10 +897,14 @@ export function App() {
       {mailBindModal ? (
         <MailBindModal
           mailStatus={mailStatus}
+          authUrl={mailAuthUrl}
           loading={loading === "mail-auth"}
           onClose={() => setMailBindModal(false)}
           onBind={() => bindAgentMail(false)}
           onRebind={() => bindAgentMail(true)}
+          onOpenAuthUrl={() => {
+            if (mailAuthUrl) window.open(mailAuthUrl, "_blank", "noopener,noreferrer");
+          }}
           onRefresh={() => refresh().catch(() => null)}
         />
       ) : null}
