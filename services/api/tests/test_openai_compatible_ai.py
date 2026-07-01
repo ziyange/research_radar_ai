@@ -1,5 +1,4 @@
 import json
-import os
 import asyncio
 from collections.abc import Iterator
 
