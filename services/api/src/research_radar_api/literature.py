@@ -6,9 +6,11 @@ import mimetypes
 import os
 import re
 import shutil
+import smtplib
 import subprocess
 import time
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -200,7 +202,23 @@ def confirmation_token_invalid(output: str) -> bool:
 
 
 def mail_status() -> dict[str, Any]:
-    enabled = get_settings().agent_mail_enabled or get_settings().email_provider == "agent_mail"
+    settings = get_settings()
+    if settings.email_provider == "smtp":
+        configured = bool(
+            settings.smtp_host
+            and settings.email_from
+            and (not settings.smtp_username or settings.smtp_password)
+        )
+        return {
+            "enabled": configured,
+            "installed": True,
+            "authorized": configured,
+            "email": settings.email_from,
+            "sendCapable": configured,
+            "provider": "smtp",
+            "message": "ok" if configured else "SMTP_CONFIG_MISSING",
+        }
+    enabled = settings.agent_mail_enabled or settings.email_provider == "agent_mail"
     cli = agent_mail_cli_path()
     if not shutil.which(cli) and not Path(cli).exists():
         return {"enabled": enabled, "installed": False, "authorized": False, "email": "", "sendCapable": False, "cli": cli, "message": "Agent Mail CLI 未安装"}
@@ -215,9 +233,45 @@ def mail_status() -> dict[str, Any]:
         "authorized": bool(result.code == 0 and email),
         "email": email,
         "sendCapable": bool(result.code == 0 and email),
+        "provider": "agent_mail",
         "cli": cli,
         "message": "ok" if result.code == 0 else (result.stderr or result.stdout or "Agent Mail 未授权"),
     }
+
+
+def send_smtp_delivery(delivery: dict[str, Any], body_path: Path) -> str:
+    settings = get_settings()
+    if not settings.smtp_host:
+        raise RuntimeError("SMTP_CONFIG_MISSING")
+    recipients = delivery.get("recipients") or []
+    cc = delivery.get("cc") or []
+    bcc = delivery.get("bcc") or []
+    message = EmailMessage()
+    message["From"] = settings.email_from
+    message["To"] = ", ".join(recipients)
+    if cc:
+        message["Cc"] = ", ".join(cc)
+    message["Subject"] = delivery["subject"]
+    message.set_content(body_path.read_text(encoding="utf-8", errors="ignore"))
+    for attachment in (delivery.get("attachments") or [])[:3]:
+        attachment_path = resolve_reader_file(str(attachment or ""))
+        if not attachment_path:
+            continue
+        content_type, _ = mimetypes.guess_type(attachment_path.name)
+        maintype, subtype = (content_type or "application/octet-stream").split("/", 1)
+        message.add_attachment(
+            attachment_path.read_bytes(),
+            maintype=maintype,
+            subtype=subtype,
+            filename=attachment_path.name,
+        )
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as smtp:
+        if settings.smtp_use_tls:
+            smtp.starttls()
+        if settings.smtp_username:
+            smtp.login(settings.smtp_username, settings.smtp_password or "")
+        smtp.send_message(message, to_addrs=[*recipients, *cc, *bcc])
+    return f"smtp:{int(time.time())}"
 
 
 def delivery_subject(kind: str, paper: dict[str, Any], task: dict[str, Any] | None = None) -> str:
@@ -363,6 +417,24 @@ def attempt_mail_delivery(delivery_id: str, confirmation_token: str = "") -> dic
     body_path = resolve_reader_file(delivery["markdownPath"])
     if not body_path:
         delivery.update(status="failed", error="MAIL_BODY_FILE_MISSING")
+        repository._persist_item("mailDeliveries", delivery)
+        return delivery
+    if status.get("provider") == "smtp":
+        delivery.update(status="sending", recipient=",".join(recipients), error="")
+        repository._persist_item("mailDeliveries", delivery)
+        try:
+            provider_message_id = send_smtp_delivery(delivery, body_path)
+            delivery.update(
+                status="sent",
+                sentAt=now_iso(),
+                error="",
+                providerMessageId=provider_message_id,
+                confirmationToken="",
+                confirmationSummary="",
+            )
+        except Exception as exc:
+            delivery.update(status="failed", error=str(exc) or "SMTP_SEND_FAILED")
+        repository.library["mailDeliveries"][index] = delivery
         repository._persist_item("mailDeliveries", delivery)
         return delivery
     args = ["message", "+send"]
@@ -695,6 +767,23 @@ def confirm_mail_delivery(delivery_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail={"code": "MAIL_CONFIRMATION_TOKEN_MISSING"})
     updated = attempt_mail_delivery(delivery_id, token)
     return {"delivery": repository.serialize_delivery(updated), "library": repository.serialize_library()}
+
+
+@router.post("/mail/deliveries:confirm-pending")
+def confirm_pending_mail_deliveries() -> dict[str, Any]:
+    pending = [
+        item
+        for item in repository.library["mailDeliveries"]
+        if item.get("status") == "pending_confirmation" and item.get("confirmationToken")
+    ]
+    confirmed: list[dict[str, Any]] = []
+    for delivery in pending:
+        updated = attempt_mail_delivery(delivery["id"], delivery["confirmationToken"])
+        confirmed.append(repository.serialize_delivery(updated))
+    return {
+        "confirmed": confirmed,
+        "library": repository.serialize_library(),
+    }
 
 
 @router.post("/mail/deliveries/{delivery_id}:retry")

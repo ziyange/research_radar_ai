@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 from research_radar_api import literature
 from research_radar_api.main import app
@@ -209,6 +210,100 @@ def test_literature_expired_confirmation_regenerates_pending_token(monkeypatch) 
     assert refreshed["confirmationToken"] == "ctk_new_confirmation"
     assert any("--confirmation-token" in call for call in calls)
     assert calls[-1].count("--confirmation-token") == 0
+
+
+def test_literature_confirms_all_pending_deliveries(monkeypatch) -> None:
+    monkeypatch.setattr(
+        literature,
+        "mail_status",
+        lambda: {
+            "enabled": True,
+            "installed": True,
+            "authorized": True,
+            "email": "sender@example.com",
+            "sendCapable": True,
+            "cli": "agently-cli",
+            "message": "ok",
+        },
+    )
+    calls: list[list[str]] = []
+
+    def fake_run_agent_mail(args, cwd=None, timeout=45):  # noqa: ANN001, ARG001
+        calls.append(args)
+        return literature.CliResult(0, '{"data": {"message_id": "msg_sent"}}', "")
+
+    monkeypatch.setattr(literature, "run_agent_mail", fake_run_agent_mail)
+    deliveries = []
+    for index in range(2):
+        delivery = literature.add_mail_delivery(
+            "mail_test",
+            {"id": f"mail_test_batch_{index}", "title": f"批量确认测试 {index}", "abstract": "test"},
+            task={"query": "mail batch"},
+            recipients=["recipient@example.com"],
+        )
+        delivery.update(status="pending_confirmation", confirmationToken=f"ctk_batch_{index}", error="")
+        literature.repository._persist_item("mailDeliveries", delivery)
+        deliveries.append(delivery)
+
+    response = client.post("/api/v1/literature/mail/deliveries:confirm-pending")
+
+    assert response.status_code == 200
+    assert len(response.json()["confirmed"]) >= 2
+    assert all("--confirmation-token" in call for call in calls[-2:])
+
+
+def test_literature_smtp_delivery_sends_without_confirmation(monkeypatch) -> None:
+    sent: list[object] = []
+
+    class FakeSmtp:
+        def __init__(self, host: str, port: int, timeout: int) -> None:
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+
+        def __enter__(self) -> "FakeSmtp":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def starttls(self) -> None:
+            return None
+
+        def login(self, username: str, password: str) -> None:
+            assert username == "sender@example.com"
+            assert password == "secret"
+
+        def send_message(self, message: object, to_addrs: list[str]) -> None:
+            sent.append((message, to_addrs))
+
+    monkeypatch.setattr(literature.smtplib, "SMTP", FakeSmtp)
+    monkeypatch.setattr(
+        literature,
+        "get_settings",
+        lambda: SimpleNamespace(
+            email_provider="smtp",
+            email_from="Research Radar AI <sender@example.com>",
+            smtp_host="smtp.example.com",
+            smtp_port=587,
+            smtp_username="sender@example.com",
+            smtp_password="secret",
+            smtp_use_tls=True,
+            agent_mail_default_recipients=[],
+        ),
+    )
+
+    delivery = literature.add_mail_delivery(
+        "mail_test",
+        {"id": "mail_test_smtp", "title": "SMTP 自动发送测试", "abstract": "test"},
+        task={"query": "smtp"},
+        recipients=["recipient@example.com"],
+    )
+
+    assert delivery["status"] == "sent"
+    assert delivery["confirmationToken"] == ""
+    assert sent
+    assert sent[0][1] == ["recipient@example.com"]
 
 
 def test_literature_file_route_serves_markdown() -> None:

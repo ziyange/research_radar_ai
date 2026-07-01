@@ -175,16 +175,24 @@ function canRetryMailDelivery(delivery) {
   return /confirmation token|AGENT_MAIL|MAIL_/i.test(error);
 }
 
-function MailDeliveryList({ deliveries, onConfirmMailDelivery, onRetryMailDelivery, loading }) {
+function MailDeliveryList({ deliveries, onConfirmMailDelivery, onConfirmPendingMailDeliveries, onRetryMailDelivery, loading }) {
   const latest = [...(deliveries || [])]
     .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
     .slice(0, 8);
+  const pendingCount = (deliveries || []).filter(
+    (delivery) => delivery.status === "pending_confirmation" && delivery.confirmationToken,
+  ).length;
   if (!latest.length) return null;
   return (
     <div className="mail-delivery-list">
       <div className="mail-delivery-title">
         <strong>邮箱推送记录</strong>
         <span>{latest.length} 条最近记录</span>
+        {pendingCount ? (
+          <button type="button" onClick={onConfirmPendingMailDeliveries} disabled={loading === "mail-confirm-all"}>
+            确认发送全部待确认（{pendingCount}）
+          </button>
+        ) : null}
       </div>
       {latest.map((delivery) => (
         <div className={`mail-delivery-row ${delivery.status}`} key={delivery.id}>
@@ -235,6 +243,7 @@ export function RunLogList({
   mailStatus,
   onBindMail,
   onConfirmMailDelivery,
+  onConfirmPendingMailDeliveries,
   onRetryMailDelivery,
   loading,
 }) {
@@ -270,6 +279,7 @@ export function RunLogList({
       <MailDeliveryList
         deliveries={mailDeliveries || []}
         onConfirmMailDelivery={onConfirmMailDelivery}
+        onConfirmPendingMailDeliveries={onConfirmPendingMailDeliveries}
         onRetryMailDelivery={onRetryMailDelivery}
         loading={loading}
       />

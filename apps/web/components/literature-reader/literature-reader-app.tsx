@@ -216,6 +216,21 @@ export function App() {
     }
   }
 
+  async function confirmPendingMailDeliveries() {
+    setLoading("mail-confirm-all");
+    try {
+      const data = await api.confirmPendingMailDeliveries();
+      setLibrary(data.library);
+      const sentCount = (data.confirmed || []).filter((item) => item.status === "sent").length;
+      setStatus({ tone: "success", message: sentCount ? `已确认发送 ${sentCount} 封邮件` : "已处理待确认邮件" });
+    } catch (err) {
+      setError(err.message);
+      setStatus({ tone: "error", message: err.message });
+    } finally {
+      setLoading(null);
+    }
+  }
+
   async function retryMailDelivery(delivery) {
     if (!delivery) return;
     setLoading(`mail-retry-${delivery.id}`);
@@ -772,6 +787,7 @@ export function App() {
             mailStatus={mailStatus}
             onBindMail={() => setMailBindModal(true)}
             onConfirmMailDelivery={confirmMailDelivery}
+            onConfirmPendingMailDeliveries={confirmPendingMailDeliveries}
             onRetryMailDelivery={retryMailDelivery}
             loading={loading}
           />

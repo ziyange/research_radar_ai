@@ -86,6 +86,10 @@ export const api = {
     const response = await fetch(`${API_BASE}/mail/deliveries/${encodeURIComponent(id)}:confirm`, { method: "POST" });
     return parseApiResponse(response, "确认发送失败");
   },
+  async confirmPendingMailDeliveries() {
+    const response = await fetch(`${API_BASE}/mail/deliveries:confirm-pending`, { method: "POST" });
+    return parseApiResponse(response, "批量确认发送失败");
+  },
   async retryMailDelivery(id) {
     const response = await fetch(`${API_BASE}/mail/deliveries/${encodeURIComponent(id)}:retry`, { method: "POST" });
     return parseApiResponse(response, "重试发送失败");

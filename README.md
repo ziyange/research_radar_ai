@@ -76,7 +76,19 @@ GET http://127.0.0.1:8010/api/v1/literature/library
 
 首次启动 FastAPI 时，会从正式本地存储目录 `storage/literature/imported-local-data/` 导入历史文献、报告、采集记录和任务，再写入 PostgreSQL `rr_entities` 或内存开发存储。
 
-Agent Mail 中“绑定邮箱”是发送账号，不是收件人。推送邮件必须配置收件人：
+自动化推送推荐使用 SMTP，因为 Agent Mail CLI 的写操作需要人工确认，不能作为无人值守投递通道：
+
+```text
+EMAIL_PROVIDER=smtp
+EMAIL_FROM=Research Radar AI <no-reply@example.com>
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your-account@example.com
+SMTP_PASSWORD=your-smtp-password-or-app-password
+SMTP_USE_TLS=true
+```
+
+Agent Mail 仍可用于手动/调试投递。“绑定邮箱”是发送账号，不是收件人。推送邮件必须配置收件人：
 
 ```text
 EMAIL_PROVIDER=agent_mail
@@ -92,7 +104,7 @@ AGENT_MAIL_DEFAULT_RECIPIENTS=reader@example.com
 - `body_file`：生成的 Markdown 文件，完整文献包含文献信息、摘要、链接和本地原文/解析；AI 任务包含单篇 AI 报告
 - `attachment`：最多 3 个，第一版优先附带本地 PDF
 
-邮件发送遵循 Agent Mail 两阶段确认：任务完成后会自动发起投递；若 CLI 返回 `ctk_xxx`，状态先进入 `pending_confirmation`，前端点击确认后才会带 `confirmation-token` 完成发送。
+`EMAIL_PROVIDER=smtp` 时，任务完成后会直接自动发送，不需要人工确认。`EMAIL_PROVIDER=agent_mail` 时，发送遵循 Agent Mail 两阶段确认：任务完成后会自动发起投递；若 CLI 返回 `ctk_xxx`，状态先进入 `pending_confirmation`，前端点击确认后才会带 `confirmation-token` 完成发送。
 
 ### Agent 来源配置
 
