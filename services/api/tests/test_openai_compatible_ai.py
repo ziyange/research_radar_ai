@@ -5,10 +5,6 @@ from collections.abc import Iterator
 
 from fastapi.testclient import TestClient
 
-os.environ["AI_PROVIDER"] = "mock"
-os.environ["RETRIEVAL_PROVIDER"] = "mock"
-os.environ["DEMO_SEED_ENABLED"] = "true"
-os.environ["DEV_USER_ID"] = "usr_demo"
 
 from research_radar_api import ai as ai_module  # noqa: E402
 from research_radar_api.main import app  # noqa: E402
