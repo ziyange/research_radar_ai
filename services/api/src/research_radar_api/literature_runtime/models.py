@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def unique_strings(values: list[object]) -> list[str]:
@@ -42,6 +42,12 @@ class TaskPayload(BaseModel):
         if invalid:
             raise ValueError(f"Invalid email address: {', '.join(invalid)}")
         return cleaned
+
+    @model_validator(mode="after")
+    def validate_mail_push_recipients(self) -> "TaskPayload":
+        if self.notifyAfterRun and not self.recipientEmails:
+            raise ValueError("recipientEmails is required when notifyAfterRun is enabled")
+        return self
 
 
 class AnalyzePayload(BaseModel):

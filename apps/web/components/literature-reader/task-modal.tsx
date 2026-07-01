@@ -28,6 +28,13 @@ export function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus 
   const bccEmails = parseEmailList(form.bccEmailsText);
   const mailInvalids = invalidEmails([...recipientEmails, ...ccEmails, ...bccEmails]);
   const canEnablePush = mailBound && recipientEmails.length > 0 && mailInvalids.length === 0;
+  const mailValidationMessage = mailError || (
+    mailBound && form.notifyAfterRun && !recipientEmails.length
+      ? "开启推送邮箱时必须填写收件人 To。"
+      : mailBound && mailInvalids.length
+        ? `邮箱格式不正确：${mailInvalids.join(", ")}`
+        : ""
+  );
 
   function update(field, value) {
     if (field === "recipientEmailsText" || field === "ccEmailsText" || field === "bccEmailsText") {
@@ -194,7 +201,7 @@ export function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus 
                   <button
                     type="button"
                     className={`mail-push-toggle ${form.notifyAfterRun ? "on" : ""}`}
-                    disabled={!mailBound || (!form.notifyAfterRun && !canEnablePush)}
+                    disabled={!mailBound}
                     onClick={toggleMailPush}
                   >
                     {form.notifyAfterRun ? "已开启" : "开启推送"}
@@ -231,7 +238,7 @@ export function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus 
                     <p className="modal-hint">
                       Subject 由系统按每篇文献自动生成；正文使用 Markdown body_file。Agent Mail 返回确认令牌时，右侧记录会显示“确认发送”。
                     </p>
-                    {mailError ? <p className="modal-error">{mailError}</p> : null}
+                    {mailValidationMessage ? <p className="modal-error">{mailValidationMessage}</p> : null}
                   </div>
                 ) : null}
               </div>

@@ -121,6 +121,52 @@ def test_literature_task_rejects_invalid_recipient_email() -> None:
     assert response.status_code == 422
 
 
+def test_literature_task_rejects_push_without_recipient() -> None:
+    payload = {
+        "query": "nanomaterials plant",
+        "count": 2,
+        "yearFrom": 2021,
+        "minScore": 50,
+        "sources": ["openalex", "crossref"],
+        "downloadOpenPdf": False,
+        "autoAnalyze": False,
+        "dailyEnabled": False,
+        "dailyTime": "09:00",
+        "dailyTimezone": "Asia/Shanghai",
+        "notifyAfterRun": True,
+        "recipientEmails": [],
+    }
+
+    response = client.post("/api/v1/literature/tasks", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_literature_run_rejects_legacy_push_task_without_recipient() -> None:
+    task = {
+        "id": "task_legacy_missing_recipient",
+        "query": "mail missing recipient",
+        "count": 1,
+        "yearFrom": 2021,
+        "minScore": 0,
+        "sources": ["openalex"],
+        "downloadOpenPdf": False,
+        "autoAnalyze": False,
+        "dailyEnabled": False,
+        "dailyTime": "09:00",
+        "dailyTimezone": "Asia/Shanghai",
+        "notifyAfterRun": True,
+        "recipientEmails": [],
+    }
+    literature.repository.tasks = [task, *[item for item in literature.repository.tasks if item["id"] != task["id"]]]
+    literature.repository._persist_item("tasks", task)
+
+    response = client.post(f"/api/v1/literature/tasks/{task['id']}:run", json={})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "MAIL_RECIPIENT_REQUIRED"
+
+
 def test_literature_expired_confirmation_regenerates_pending_token(monkeypatch) -> None:
     monkeypatch.setattr(
         literature,

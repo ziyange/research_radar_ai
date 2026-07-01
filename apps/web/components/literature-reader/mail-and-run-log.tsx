@@ -149,6 +149,9 @@ export function mailStatusText(status) {
 function mailErrorText(error) {
   const text = String(error || "");
   if (!text) return "";
+  if (text === "MAIL_RECIPIENT_REQUIRED") {
+    return "缺少收件人 To，请编辑采集任务并填写有效邮箱。";
+  }
   if (/confirmation token/i.test(text) && /expired|invalid/i.test(text)) {
     return "确认令牌已过期或无效，请重新生成确认。";
   }
@@ -162,6 +165,7 @@ function mailErrorText(error) {
 
 function canRetryMailDelivery(delivery) {
   if (!delivery) return false;
+  if (delivery.error === "MAIL_RECIPIENT_REQUIRED") return false;
   if (delivery.status === "queued") return true;
   if (delivery.status !== "failed") return false;
   const error = String(delivery.error || "");

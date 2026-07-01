@@ -502,6 +502,18 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
     task = next((item for item in repository.tasks if item["id"] == task_id), None)
     if not task:
         raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND"})
+    if task.get("notifyAfterRun") and not task.get("recipientEmails"):
+        task["lastRunStatus"] = "failed"
+        task["lastRunError"] = "MAIL_RECIPIENT_REQUIRED"
+        task["lastRunFinishedAt"] = now_iso()
+        repository._persist_item("tasks", task)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "MAIL_RECIPIENT_REQUIRED",
+                "message": "开启推送邮箱时必须在任务中填写收件人 To。",
+            },
+        )
     task["lastRunStatus"] = "running"
     task["lastRunStartedAt"] = now_iso()
     repository._persist_item("tasks", task)
