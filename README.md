@@ -6,6 +6,45 @@ AI 科研情报、知识管理与课题推进平台。
 
 `采集任务 -> OpenAlex/Crossref 检索 -> 去重入库 -> 本地文献库知识图谱 -> 文献原文/PDF -> AI Markdown 分析报告 -> Agent Mail 推送`
 
+当前主入口：
+
+- 前端：`apps/web`，Next.js。
+- 后端：`services/api`，FastAPI。
+- 主 API：`/api/v1/literature/*`。
+- 交接文档：[docs/RR-MAIN-004-project-handoff.md](docs/RR-MAIN-004-project-handoff.md)。
+
+旧的 `apps/literature-reader` 独立 demo 已删除，`4177` 端口不再作为产品入口。旧 Phase 1 项目/画像/推荐接口仍在后端中作为历史兼容能力，当前主 UI 不再使用。
+
+## 从 Clone 到启动
+
+Windows PowerShell：
+
+```powershell
+git clone git@github.com:ziyange/research_radar_ai.git
+Set-Location research_radar_ai
+
+uv python install 3.12 --install-dir .python --cache-dir .uv-cache
+uv venv .venv --python '.python\cpython-3.12.11-windows-x86_64-none\python.exe' --cache-dir .uv-cache
+uv sync --cache-dir .uv-cache
+
+npm install --cache .npm-cache
+Copy-Item .env.example .env
+```
+
+启动后端：
+
+```powershell
+uv run uvicorn research_radar_api.main:app --reload --host 127.0.0.1 --port 8010 --app-dir services/api/src
+```
+
+另开终端启动前端：
+
+```powershell
+npm run dev:web
+```
+
+访问 Next.js 输出的地址，通常是 `http://localhost:3000`；如果 3000 被占用，Next.js 会自动切到 `http://localhost:3001`。
+
 ## 本地 Python 环境
 
 本项目使用 `uv` 和项目内 Python 运行时：
@@ -57,11 +96,11 @@ AGENT_AI_ANALYSIS_CONCURRENCY=2
 
 `DEMO_SEED_ENABLED=false` 是真实业务默认值，不会初始化 demo 论文。开发演示或本地 smoke flow 可显式改为 `true`。`DEV_USER_ID=usr_demo` 仅用于开发环境免登录；生产环境应接入正式认证，不依赖该值。
 
-Phase 1 默认验收全部使用 mock AI，不需要也不读取真实 OpenAI Key。
+本地文档/界面验收可以使用 `AI_PROVIDER=mock`；真实 AI 报告验收必须配置 OpenAI-compatible 参数。
 
 ### 文献阅读器主产品配置
 
-主前端为 Next.js，主后端为 FastAPI。Next.js 会把浏览器侧 `/api/v1/*` 请求代理到：
+主前端为 Next.js，主后端为 FastAPI。前端 API client 默认指向：
 
 ```text
 NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8010/api/v1
@@ -76,19 +115,7 @@ GET http://127.0.0.1:8010/api/v1/literature/library
 
 首次启动 FastAPI 时，会从正式本地存储目录 `storage/literature/imported-local-data/` 导入历史文献、报告、采集记录和任务，再写入 PostgreSQL `rr_entities` 或内存开发存储。
 
-自动化推送推荐使用 SMTP，因为 Agent Mail CLI 的写操作需要人工确认，不能作为无人值守投递通道：
-
-```text
-EMAIL_PROVIDER=smtp
-EMAIL_FROM=Research Radar AI <no-reply@example.com>
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USERNAME=your-account@example.com
-SMTP_PASSWORD=your-smtp-password-or-app-password
-SMTP_USE_TLS=true
-```
-
-Agent Mail 也可作为产品自动化通道使用。“绑定邮箱”是发送账号，不是收件人。推送邮件必须配置收件人，并开启自动确认：
+当前邮件推送以 Agent Mail 为主。“绑定邮箱”是发送账号，不是收件人。推送邮件必须配置收件人，并开启自动确认：
 
 ```text
 EMAIL_PROVIDER=agent_mail
@@ -106,6 +133,18 @@ AGENT_MAIL_DEFAULT_RECIPIENTS=reader@example.com
 - `attachment`：最多 3 个，第一版优先附带本地 PDF
 
 `EMAIL_PROVIDER=smtp` 时，任务完成后会直接自动发送，不需要人工确认。`EMAIL_PROVIDER=agent_mail` 且 `AGENT_MAIL_AUTO_CONFIRM=true` 时，任务完成后会自动发起投递，若 CLI 返回 `ctk_xxx`，后端会立即带 `confirmation-token` 完成第二次发送。`AGENT_MAIL_AUTO_CONFIRM=false` 时，仍保留前端人工确认流程。
+
+如后续要接通用事务邮件，也可以切换 SMTP：
+
+```text
+EMAIL_PROVIDER=smtp
+EMAIL_FROM=Research Radar AI <no-reply@example.com>
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your-account@example.com
+SMTP_PASSWORD=your-smtp-password-or-app-password
+SMTP_USE_TLS=true
+```
 
 ### Agent 来源配置
 
@@ -201,106 +240,68 @@ http://localhost:3000
 
 当前 `/` 直接进入文献阅读器主界面。旧 Phase 1 工作台、`/knowledge`、`/reports` 页面以及独立文献阅读器 demo 已经移除。主前端使用 `http://localhost:3000`，API 使用 `http://127.0.0.1:8010`。
 
-## Phase 1 本地总验收
-
-默认验收不需要 secrets、不访问 live OpenAlex/Crossref、不依赖 PostgreSQL。Windows 上建议先进入 `.venv`，确保 `python` 和 `ruff` 来自项目环境：
+## 当前验证命令
 
 ```powershell
-uv sync --cache-dir .uv-cache
-npm install
-.\.venv\Scripts\Activate.ps1
-.\scripts\check_phase1.ps1
-```
-
-Linux/macOS 等价命令：
-
-```bash
-uv sync --dev
-npm ci
-source .venv/bin/activate
-bash scripts/check_phase1.sh
-```
-
-脚本覆盖以下发布前检查：
-
-```powershell
-python -m pytest
-ruff check --no-cache
+.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider
+.\.venv\Scripts\ruff.exe check --no-cache services/api
 npm run lint:web
 npx tsc --noEmit --project apps/web/tsconfig.json
 npm run build
-python services/api/evals/recommendation_eval.py --top-n 10
-python services/api/evals/ai_safety_eval.py
 ```
 
-GitHub Actions 使用同一组检查，见 `.github/workflows/ci.yml`。CI 环境变量固定为 `AI_PROVIDER=mock`、`RETRIEVAL_PROVIDER=mock`、`DATABASE_URL=sqlite+memory://ci`、`RUN_LIVE_RETRIEVAL_TESTS=0`、`RUN_POSTGRES_TESTS=0`。
-
-## 新机器从 clone 到跑通验收
-
-Windows PowerShell：
-
-```powershell
-git clone git@github.com:ziyange/research_radar_ai.git
-Set-Location research_radar_ai
-uv python install 3.12 --install-dir .python --cache-dir .uv-cache
-uv venv .venv --python '.python\cpython-3.12.11-windows-x86_64-none\python.exe' --cache-dir .uv-cache
-uv sync --cache-dir .uv-cache
-npm install
-Copy-Item .env.example .env
-.\.venv\Scripts\Activate.ps1
-.\scripts\check_phase1.ps1
-```
-
-启动本地 MVP：
-
-```powershell
-$env:AI_PROVIDER="mock"
-$env:RETRIEVAL_PROVIDER="mock"
-$env:DATABASE_URL="sqlite+memory://dev"
-$env:DEMO_SEED_ENABLED="true"
-$env:DEV_USER_ID="usr_demo"
-uv run uvicorn research_radar_api.main:app --reload --host 127.0.0.1 --port 8010 --app-dir services/api/src
-```
-
-另开一个终端：
-
-```powershell
-npm run dev:web
-```
-
-如未复制 `apps/web/.env.example`，前端本地免登录 smoke 需要设置：
-
-```powershell
-$env:NEXT_PUBLIC_DEV_USER_ID="usr_demo"
-```
-
-访问：
-
-- API: `http://127.0.0.1:8010/api/v1/health`
-- Web: `http://localhost:3000`
-
-## 可选实机验收
-
-PostgreSQL 实机持久化验收需先启动 docker-compose 的 postgres，并显式打开：
+可选实机验收：
 
 ```powershell
 $env:DATABASE_URL="postgresql+psycopg://research_radar:research_radar@localhost:5432/research_radar"
 $env:RUN_POSTGRES_TESTS="1"
-.venv\Scripts\python.exe -m pytest services/api/tests/test_postgres_persistence.py
+.\.venv\Scripts\python.exe -m pytest services/api/tests/test_postgres_persistence.py -p no:cacheprovider
 ```
-
-真实 OpenAlex/Crossref smoke 测试也必须显式打开，默认 CI 不运行：
 
 ```powershell
 $env:RUN_LIVE_RETRIEVAL_TESTS="1"
-python -m pytest services/api/tests/test_live_retrieval.py
+.\.venv\Scripts\python.exe -m pytest services/api/tests/test_live_retrieval.py -p no:cacheprovider
 ```
 
-## Phase 1 / Phase 2 边界
+## 当前功能
 
-Phase 1 已完成的是 MVP 闭环：账号与项目、画像、上传队列、检索规划、OpenAlex/Crossref 适配与 mock 降级、排重、推荐、反馈纠偏、快速/标准 AI 分析的 mock 验收、知识库基础状态、日报/周报、站内消息、mock email outbox、成本额度、审计与任务状态。
+- 采集任务：研究方向、篇数、年份、评分、来源、是否 AI 分析、是否邮件推送。
+- 开放数据源：OpenAlex、Crossref。外部 `503/429/500` 会记录为来源降级，不应直接中断整次任务。
+- 本地文献库：知识图谱、右侧列表、搜索、排序、节点定位、文献详情。
+- 文献原文：优先 PDF；没有全文时提示打开 DOI 下载并上传，或尝试自动获取公开 PDF/HTML。
+- AI 分析：必须先有可读全文；只有元数据/摘要时禁止生成报告。
+- 邮件推送：任务完成后逐篇推送完整文献卡片或 AI 分析报告。
+- 浮层任务中心：采集、全文获取、上传、AI 分析、邮件状态和错误提示统一进入右下角浮层。
 
-仍属于 Phase 2 或未来能力：全文 PDF 章节/表格/图证据定位、真实邮件服务、真实 OpenAI Key 生产接入、Semantic Scholar/arXiv 扩展、Zotero、浏览器扩展、移动端、团队/机构版、私有部署和复杂知识图谱。
+## 主要目录
+
+```text
+apps/web/                                  Next.js 主前端
+apps/web/components/literature-reader/     文献阅读器组件域
+services/api/src/research_radar_api/       FastAPI 应用
+services/api/src/research_radar_api/literature.py
+                                            当前主产品 API 路由
+services/api/src/research_radar_api/literature_runtime/
+                                            检索、全文、AI、仓储运行模块
+docs/                                      文档基线、阶段报告、交接文档
+storage/literature/                        本地对象存储与导入数据
+```
+
+## 常见问题
+
+- 前端报 `Unexpected token '<'`：通常是 API 请求打到了 Next.js 页面而不是 FastAPI。检查 `NEXT_PUBLIC_API_BASE_URL` 和后端端口。
+- `8010` 启动报 `WinError 10013`：端口被占用或权限限制。换端口启动，并同步修改 `NEXT_PUBLIC_API_BASE_URL`。
+- OpenAlex `503` / Crossref `429`：外部服务限流或临时不可用。系统会降级并记录来源状态；建议配置 `OPENALEX_EMAIL`。
+- AI 报告按钮不可用：该论文没有可读全文。先打开 DOI 下载 PDF，再在文献详情上传。
+- 邮件缺少收件人：采集任务中必须填写推送邮箱 `to`，仅绑定发送邮箱不等于设置收件人。
+
+## 当前边界与未完成
+
+- 自动执行字段已经存在，但正式无人值守调度仍需接 Redis + RQ/Celery。
+- 当前持久化仍以 `rr_entities` JSONB 为主，正式关系模型和迁移脚本仍待补。
+- Semantic Scholar、arXiv、中文数据库、Zotero、浏览器扩展、移动端、团队/机构版仍属于后续阶段。
+- X-MOL/CNKI 未配置官方授权 API 时不做自动抓取，不保存学校账号、图书馆密码、统一认证密码或长期 Cookie。
+- 没有全文时不生成“摘要级伪分析报告”。
 
 ## 文档约束
 

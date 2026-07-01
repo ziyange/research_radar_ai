@@ -1,9 +1,9 @@
 # 研知雷达 Research Radar AI 文档基线
 
-版本：v0.1  
-日期：2026-06-14  
-状态：MVP 文档基线  
-适用范围：第一轮只建立需求、架构、开发规划、接口与验收标准，不实现业务代码。
+版本：v0.2
+日期：2026-07-01
+状态：文档优先主产品基线
+适用范围：原始 PRD、历史阶段报告、当前文献阅读器主产品、后续开发交接与验收标准。
 
 ## 1. 文档原则
 
@@ -41,8 +41,9 @@
 | [RR-MAIN-001-literature-reader-migration.md](./RR-MAIN-001-literature-reader-migration.md) | 文献阅读器 demo 全量迁移主产品的接口、数据、邮件与验收基线 | 产品、前端、后端、测试 |
 | [RR-MAIN-001-acceptance-report.md](./RR-MAIN-001-acceptance-report.md) | RR-MAIN-001 实施结果、验收命令、邮件实发前置条件和后续动作 | 产品、前端、后端、测试 |
 | [RR-MAIN-002-codebase-and-doc-gap-audit.md](./RR-MAIN-002-codebase-and-doc-gap-audit.md) | 主产品代码清理、文档对齐、旧 Phase 1 兼容能力和后续功能补齐清单 | 产品、研发、测试、管理 |
+| [RR-MAIN-004-project-handoff.md](./RR-MAIN-004-project-handoff.md) | 当前项目交接文档：从启动、功能、架构、接口、文档地图到未来开发清单 | 新接手开发者、Agent、产品、测试 |
 
-说明：`RR-DEV-008-gap-audit.md`、`RR-DEV-010-current-product-acceptance-audit.md` 属于 RR-MAIN-001 迁移前的历史审计。当前主产品验收应优先参考 `RR-MAIN-001-*` 与 `RR-MAIN-002-*` 文档。
+说明：`RR-DEV-008-gap-audit.md`、`RR-DEV-010-current-product-acceptance-audit.md` 属于 RR-MAIN-001 迁移前的历史审计。当前主产品验收应优先参考 `RR-MAIN-001-*`、`RR-MAIN-002-*` 与 `RR-MAIN-004-project-handoff.md`。
 
 ## 3. 需求编号规则
 
