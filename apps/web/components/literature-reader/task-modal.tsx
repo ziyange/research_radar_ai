@@ -5,6 +5,16 @@ import { X } from "@phosphor-icons/react";
 import { invalidEmails, parseEmailList } from "./utils";
 
 export function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus }) {
+  const mailBound = Boolean(mailStatus?.authorized && mailStatus.email);
+  const initialRecipientEmailsText = (initial.recipientEmails || []).join(", ");
+  const initialCcEmailsText = (initial.ccEmails || []).join(", ");
+  const initialBccEmailsText = (initial.bccEmails || []).join(", ");
+  const initialRecipientEmails = parseEmailList(initialRecipientEmailsText);
+  const initialInvalids = invalidEmails([
+    ...initialRecipientEmails,
+    ...parseEmailList(initialCcEmailsText),
+    ...parseEmailList(initialBccEmailsText),
+  ]);
   const [form, setForm] = useState({
     query: initial.query || "",
     count: initial.count ?? 5,
@@ -16,13 +26,12 @@ export function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus 
     dailyEnabled: Boolean(initial.dailyEnabled),
     dailyTime: initial.dailyTime || "09:00",
     dailyTimezone: initial.dailyTimezone || "Asia/Shanghai",
-    notifyAfterRun: Boolean(initial.notifyAfterRun),
-    recipientEmailsText: (initial.recipientEmails || []).join(", "),
-    ccEmailsText: (initial.ccEmails || []).join(", "),
-    bccEmailsText: (initial.bccEmails || []).join(", "),
+    notifyAfterRun: Boolean(initial.notifyAfterRun && mailBound && initialRecipientEmails.length && !initialInvalids.length),
+    recipientEmailsText: initialRecipientEmailsText,
+    ccEmailsText: initialCcEmailsText,
+    bccEmailsText: initialBccEmailsText,
   });
   const [mailError, setMailError] = useState("");
-  const mailBound = Boolean(mailStatus?.authorized && mailStatus.email);
   const recipientEmails = parseEmailList(form.recipientEmailsText);
   const ccEmails = parseEmailList(form.ccEmailsText);
   const bccEmails = parseEmailList(form.bccEmailsText);
@@ -40,7 +49,24 @@ export function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus 
     if (field === "recipientEmailsText" || field === "ccEmailsText" || field === "bccEmailsText") {
       setMailError("");
     }
-    setForm((current) => ({ ...current, [field]: value }));
+    setForm((current) => {
+      const next = { ...current, [field]: value };
+      if (
+        next.notifyAfterRun &&
+        (field === "recipientEmailsText" || field === "ccEmailsText" || field === "bccEmailsText")
+      ) {
+        const nextRecipients = parseEmailList(next.recipientEmailsText);
+        const nextInvalids = invalidEmails([
+          ...nextRecipients,
+          ...parseEmailList(next.ccEmailsText),
+          ...parseEmailList(next.bccEmailsText),
+        ]);
+        if (!nextRecipients.length || nextInvalids.length) {
+          next.notifyAfterRun = false;
+        }
+      }
+      return next;
+    });
   }
 
   function toggleSource(source) {
@@ -201,7 +227,7 @@ export function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus 
                   <button
                     type="button"
                     className={`mail-push-toggle ${form.notifyAfterRun ? "on" : ""}`}
-                    disabled={!mailBound}
+                    disabled={!mailBound || (!form.notifyAfterRun && !canEnablePush)}
                     onClick={toggleMailPush}
                   >
                     {form.notifyAfterRun ? "已开启" : "开启推送"}

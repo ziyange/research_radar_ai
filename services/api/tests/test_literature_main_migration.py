@@ -160,7 +160,7 @@ def test_literature_task_rejects_push_without_recipient() -> None:
     assert response.status_code == 422
 
 
-def test_literature_run_rejects_legacy_push_task_without_recipient() -> None:
+def test_literature_run_disables_legacy_push_task_without_recipient(monkeypatch) -> None:
     task = {
         "id": "task_legacy_missing_recipient",
         "query": "mail missing recipient",
@@ -179,10 +179,26 @@ def test_literature_run_rejects_legacy_push_task_without_recipient() -> None:
     literature.repository.tasks = [task, *[item for item in literature.repository.tasks if item["id"] != task["id"]]]
     literature.repository._persist_item("tasks", task)
 
+    async def fake_perform_scan(payload, task_id=None, trigger="manual"):  # noqa: ANN001, ARG001
+        assert payload["notifyAfterRun"] is False
+        return {
+            "run": {
+                "id": "scan_legacy_missing_recipient",
+                "savedCount": 0,
+                "createdAt": "2026-01-01T00:00:00+00:00",
+            },
+            "papers": [],
+            "duplicates": [],
+            "library": literature.repository.serialize_library(),
+        }
+
+    monkeypatch.setattr(literature, "perform_scan", fake_perform_scan)
+
     response = client.post(f"/api/v1/literature/tasks/{task['id']}:run", json={})
 
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "MAIL_RECIPIENT_REQUIRED"
+    assert response.status_code == 200
+    assert response.json()["tasks"][0]["notifyAfterRun"] is False
+    assert response.json()["mailDeliveries"] == literature.repository.serialize_library()["mailDeliveries"]
 
 
 def test_literature_expired_confirmation_regenerates_pending_token(monkeypatch) -> None:

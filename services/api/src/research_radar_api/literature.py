@@ -45,6 +45,46 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def normalize_task_mail_push(task: dict[str, Any]) -> bool:
+    changed = False
+    recipients = unique_strings(task.get("recipientEmails") or [])
+    cc = unique_strings(task.get("ccEmails") or [])
+    bcc = unique_strings(task.get("bccEmails") or [])
+    invalid = [
+        item
+        for item in [*recipients, *cc, *bcc]
+        if not EMAIL_PATTERN.match(str(item))
+    ]
+    if task.get("recipientEmails") != recipients:
+        task["recipientEmails"] = recipients
+        changed = True
+    if task.get("ccEmails") != cc:
+        task["ccEmails"] = cc
+        changed = True
+    if task.get("bccEmails") != bcc:
+        task["bccEmails"] = bcc
+        changed = True
+    if task.get("notifyAfterRun") and (not recipients or invalid):
+        task["notifyAfterRun"] = False
+        if invalid:
+            task["recipientEmails"] = []
+            task["ccEmails"] = []
+            task["bccEmails"] = []
+        changed = True
+    return changed
+
+
+def normalize_all_tasks_mail_push() -> None:
+    changed = False
+    for task in repository.tasks:
+        changed = normalize_task_mail_push(task) or changed
+    if changed:
+        repository.save_tasks()
+
+
 async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trigger: str = "manual") -> dict[str, Any]:
     query = str(payload.get("query") or "").strip()
     if not query:
@@ -575,6 +615,7 @@ async def scan(payload: TaskPayload) -> dict[str, Any]:
 
 @router.get("/tasks")
 def list_tasks() -> dict[str, Any]:
+    normalize_all_tasks_mail_push()
     return {"tasks": repository.tasks}
 
 
@@ -587,6 +628,7 @@ def create_task(payload: TaskPayload) -> dict[str, Any]:
         "updatedAt": now_iso(),
         "nextScheduledRunAt": "",
     }
+    normalize_task_mail_push(task)
     repository.tasks = [task, *repository.tasks]
     repository._persist_item("tasks", task)
     return {"task": task, "tasks": repository.tasks}
@@ -597,6 +639,7 @@ def update_task(task_id: str, payload: TaskPayload) -> dict[str, Any]:
     for index, task in enumerate(repository.tasks):
         if task["id"] == task_id:
             updated = {**task, **payload.model_dump(), "updatedAt": now_iso()}
+            normalize_task_mail_push(updated)
             repository.tasks[index] = updated
             repository._persist_item("tasks", updated)
             return {"task": updated, "tasks": repository.tasks}
@@ -615,18 +658,7 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
     task = next((item for item in repository.tasks if item["id"] == task_id), None)
     if not task:
         raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND"})
-    if task.get("notifyAfterRun") and not task.get("recipientEmails"):
-        task["lastRunStatus"] = "failed"
-        task["lastRunError"] = "MAIL_RECIPIENT_REQUIRED"
-        task["lastRunFinishedAt"] = now_iso()
-        repository._persist_item("tasks", task)
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "MAIL_RECIPIENT_REQUIRED",
-                "message": "开启推送邮箱时必须在任务中填写收件人 To。",
-            },
-        )
+    normalize_task_mail_push(task)
     task["lastRunStatus"] = "running"
     task["lastRunStartedAt"] = now_iso()
     repository._persist_item("tasks", task)

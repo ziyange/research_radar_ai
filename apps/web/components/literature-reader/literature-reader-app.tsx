@@ -41,6 +41,13 @@ import {
   sortPapers,
 } from "./utils";
 
+function taskMailPushReady(task) {
+  const recipients = parseEmailList((task?.recipientEmails || []).join(", "));
+  const cc = parseEmailList((task?.ccEmails || []).join(", "));
+  const bcc = parseEmailList((task?.bccEmails || []).join(", "));
+  return Boolean(task?.notifyAfterRun && recipients.length && !invalidEmails([...recipients, ...cc, ...bcc]).length);
+}
+
 export function App() {
   const [library, setLibrary] = useState({ papers: [], scanRuns: [], reports: [] });
   const [health, setHealth] = useState(null);
@@ -293,17 +300,20 @@ export function App() {
 
   async function runScan(task) {
     if (!task || runningTaskIds[task.id]) return;
+    const pushReady = taskMailPushReady(task);
+    const effectiveTask = pushReady ? task : { ...task, notifyAfterRun: false };
     setError("");
     setActiveView("scan");
-    setActiveRunLog(buildRunningLog(task));
+    setActiveRunLog(buildRunningLog(effectiveTask));
     setRunningTaskIds((current) => ({ ...current, [task.id]: true }));
     setStatus({ tone: "running", message: `正在执行：${short(task.query, 42)}` });
     try {
       const data = await api.runTask(task.id);
       setLibrary(data.library);
+      if (data.tasks) setTasks(data.tasks);
       setSelectedPaperId((current) => current || data.library?.papers?.[0]?.id || null);
       setActiveRunLog({
-        ...buildRunningLog(task),
+        ...buildRunningLog(effectiveTask),
         id: data.run.id,
         runId: data.run.id,
         status: data.run.savedCount > 0 ? "done" : "warning",
@@ -321,7 +331,7 @@ export function App() {
           ...(task.autoAnalyze
             ? [{ key: "analysis", status: "done", text: "AI 分析已由后端逐篇处理并落盘。" }]
             : []),
-          ...(task.notifyAfterRun
+          ...(pushReady
             ? [{ key: "mail", status: "done", text: `邮箱推送已生成 ${data.mailDeliveries?.length || 0} 条记录。` }]
             : []),
         ],
@@ -331,7 +341,7 @@ export function App() {
         tone: data.run.savedCount > 0 ? "success" : "warning",
         message:
           data.run.savedCount > 0
-            ? `已保存 ${data.run.savedCount} 篇${task.notifyAfterRun ? `，生成 ${data.mailDeliveries?.length || 0} 条邮箱推送` : ""}`
+            ? `已保存 ${data.run.savedCount} 篇${pushReady ? `，生成 ${data.mailDeliveries?.length || 0} 条邮箱推送` : ""}`
             : "未发现新的可入库文献",
       });
     } catch (err) {
@@ -617,7 +627,9 @@ export function App() {
             </div>
             <div className="task-list">
               {tasks.length ? (
-                tasks.map((task) => (
+                tasks.map((task) => {
+                  const pushReady = taskMailPushReady(task);
+                  return (
                   <div className="task-row" key={task.id}>
                     <div className="task-row-top">
                       <div className="task-query">{task.query}</div>
@@ -667,15 +679,16 @@ export function App() {
                       <span className={`task-tag ${task.dailyEnabled ? "on" : ""}`}>
                         {task.dailyEnabled ? `每日 ${task.dailyTime}` : "不自动执行"}
                       </span>
-                      <span className={`task-tag ${task.notifyAfterRun ? "on" : ""}`}>
-                        {task.notifyAfterRun ? "推送邮箱" : "不推送"}
+                      <span className={`task-tag ${pushReady ? "on" : ""}`}>
+                        {pushReady ? "推送邮箱" : "不推送"}
                       </span>
-                      {task.notifyAfterRun ? (
+                      {pushReady ? (
                         <span className="task-tag on">To {task.recipientEmails?.length || 0}</span>
                       ) : null}
                     </div>
                   </div>
-                ))
+                  );
+                })
               ) : (
                 <div className="empty-state">暂无采集任务，点击右上角“新增任务”创建。</div>
               )}

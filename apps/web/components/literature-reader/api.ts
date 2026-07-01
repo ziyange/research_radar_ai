@@ -41,16 +41,43 @@ async function parseApiResponse(response, fallbackMessage) {
     throw new Error(
       looksLikeHtml
         ? "请求打到了页面而不是本地 API。请确认 FastAPI 已启动在 127.0.0.1:8010，并从主前端 http://127.0.0.1:3000 访问。"
-        : fallbackMessage,
+      : fallbackMessage,
     );
   }
   if (!response.ok) {
-    const error = new Error(data.message || data.run?.error || data.error || fallbackMessage);
+    const message = apiErrorMessage(data, fallbackMessage);
+    const error = new Error(message);
     error.retrieval = data.retrieval;
     error.details = data;
     throw error;
   }
   return data;
+}
+
+function apiErrorMessage(data, fallbackMessage) {
+  const candidates = [data?.message, data?.run?.error, data?.error, data?.detail];
+  for (const candidate of candidates) {
+    const message = normalizeApiErrorValue(candidate);
+    if (message) return message;
+  }
+  return fallbackMessage;
+}
+
+function normalizeApiErrorValue(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map(normalizeApiErrorValue).filter(Boolean).join("；");
+  }
+  if (typeof value === "object") {
+    return (
+      normalizeApiErrorValue(value.message) ||
+      normalizeApiErrorValue(value.msg) ||
+      normalizeApiErrorValue(value.code) ||
+      JSON.stringify(value)
+    );
+  }
+  return String(value);
 }
 
 export const api = {
