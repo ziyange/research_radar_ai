@@ -22,6 +22,7 @@ import {
   UploadSimple,
   X,
 } from "@phosphor-icons/react";
+import { ActivityCenter } from "./activity-center";
 import { api, defaultScan } from "./api";
 import { LibraryGraphView, makeLibraryGraph } from "./library-graph";
 import { LibraryPaperListPanel } from "./library-paper-list-panel";
@@ -62,7 +63,9 @@ export function App() {
   const [librarySort, setLibrarySort] = useState("score-desc");
   const [readingMode, setReadingMode] = useState("analysis");
   const [paperMarkdown, setPaperMarkdown] = useState("");
-  const [status, setStatus] = useState({ tone: "idle", message: "准备就绪" });
+  const [status, setStatusState] = useState({ tone: "idle", message: "准备就绪" });
+  const [activities, setActivities] = useState([]);
+  const [activityOpen, setActivityOpen] = useState(false);
   const [loading, setLoading] = useState(null);
   const [runningTaskIds, setRunningTaskIds] = useState({});
   const [analyzingPaperIds, setAnalyzingPaperIds] = useState({});
@@ -78,6 +81,31 @@ export function App() {
   const reactFlowInstanceRef = useRef(null);
   const paperRowRefs = useRef({});
   const pulseTimerRef = useRef(null);
+  const activityTimersRef = useRef({});
+
+  function removeActivity(id) {
+    setActivities((current) => current.filter((item) => item.id !== id));
+    if (activityTimersRef.current[id]) {
+      window.clearTimeout(activityTimersRef.current[id]);
+      delete activityTimersRef.current[id];
+    }
+  }
+
+  function setStatus(next) {
+    setStatusState(next);
+    if (!next?.message || next.tone === "idle") return;
+    const id = `activity_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    setActivities((current) => {
+      const kept = next.tone === "running" ? current : current.filter((item) => item.tone !== "running");
+      return [{ id, ...next, createdAt: new Date().toISOString() }, ...kept].slice(0, 18);
+    });
+    if (next.tone === "success") {
+      activityTimersRef.current[id] = window.setTimeout(() => removeActivity(id), 3000);
+    }
+    if (next.tone === "error" || next.tone === "warning") {
+      setActivityOpen(true);
+    }
+  }
 
   async function refresh() {
     const [libraryData, healthData, tasksData, mailData] = await Promise.all([
@@ -158,6 +186,7 @@ export function App() {
 
   useEffect(() => () => {
     if (pulseTimerRef.current) window.clearTimeout(pulseTimerRef.current);
+    Object.values(activityTimersRef.current || {}).forEach((timer) => window.clearTimeout(timer));
   }, []);
 
   async function saveTask(form) {
@@ -387,6 +416,11 @@ export function App() {
       setError("请先选择一篇本地文献");
       return;
     }
+    if (!paper.localFullTextUrl) {
+      setError("请先获取或上传完整论文原文，再生成 AI 分析报告。");
+      setStatus({ tone: "warning", message: "请先获取或上传完整论文原文，再生成 AI 分析报告。" });
+      return;
+    }
     if (analyzingPaperIds[paper.id]) return;
     setError("");
     setAnalyzingPaperIds((current) => ({ ...current, [paper.id]: true }));
@@ -519,11 +553,13 @@ export function App() {
     selectedPaperReport?.markdown ||
     paperMarkdown ||
     "# 尚未选择文献\n\n先在左侧检索入库或选择一篇文献。中间阅读区默认展示当前文献原文；点击 AI 分析报告后，系统会为当前文献生成并展示单篇分析。\n\n## 工作流\n\n- 左侧选择文献\n- 中间阅读该文献原文：有本地 PDF 时用 PDF 阅读器，否则用 Markdown\n- 点击 AI 分析报告生成单篇分析\n- 右侧查看证据、AI 操作和本地文件入口\n";
+  const selectedPaperHasLocalSource = Boolean(selectedPaper?.localPdfUrl || selectedPaper?.localFullTextUrl);
+  const selectedPaperAnalysisReady = Boolean(selectedPaper?.localFullTextUrl);
   const sourceMarkdown = selectedPaper
-    ? `${!selectedPaper.localPdfUrl && !selectedPaper.localFullTextUrl ? `# 未获取到完整论文原文\n\n当前只保存了开放数据源返回的元数据和摘要，不等同于完整论文正文。可以先打开 DOI/来源页面下载 PDF，再在右侧上传本地 PDF。系统也可以尝试自动访问 DOI/来源页，优先下载合法公开 PDF，其次抽取公开 HTML 正文。\n\n- DOI/来源链接: ${doiUrl(selectedPaper.doi) || selectedPaper.landingPageUrl || selectedPaper.sourceUrl ? `[打开来源页面](${doiUrl(selectedPaper.doi) || selectedPaper.landingPageUrl || selectedPaper.sourceUrl})` : "未提供"}\n\n---\n\n` : ""}${(paperMarkdown || selectedReportMarkdown).replace(
-      /- 本地 PDF:.*/g,
-      `- 本地 PDF: ${selectedPaper.localPdfPath || "未下载"}`,
-    )}`
+    ? (paperMarkdown || selectedReportMarkdown).replace(
+        /- 本地 PDF:.*/g,
+        `- 本地 PDF: ${selectedPaper.localPdfPath || "未下载"}`,
+      )
     : selectedReportMarkdown;
   const selectedPaperIsAnalyzing = Boolean(selectedPaper && analyzingPaperIds[selectedPaper.id]);
   const selectedPaperIsFetchingFullText = Boolean(selectedPaper && fetchingFullTextIds[selectedPaper.id]);
@@ -599,8 +635,6 @@ export function App() {
       </aside>
 
       <section className="reader-panel">
-        {error ? <div className="error-strip">{error}</div> : null}
-
         {activeView === "scan" ? (
           <section className="workspace-panel scan-workspace task-workspace">
             <div className="task-list-header">
@@ -732,7 +766,9 @@ export function App() {
                 className={readingMode === "analysis" ? "active" : ""}
                 onClick={() => {
                   setReadingMode("analysis");
-                  if (selectedPaper && !selectedPaperReport && !selectedPaperIsAnalyzing) runAnalysis(selectedPaper);
+                  if (selectedPaper && selectedPaperAnalysisReady && !selectedPaperReport && !selectedPaperIsAnalyzing) {
+                    runAnalysis(selectedPaper);
+                  }
                 }}
                 disabled={!selectedPaper}
               >
@@ -750,24 +786,46 @@ export function App() {
                   删除该文档
                 </button>
               ) : null}
-              <span className={status.tone === "idle" ? "" : `mode-status ${status.tone}`}>
-                {readingMode === "source" && selectedPaper?.localPdfUrl
-                  ? "当前以 PDF 阅读器打开本地原文"
-                  : readingMode === "source" && selectedPaper?.localFullTextUrl
-                    ? "当前以 Markdown 展示公开全文"
-                    : readingMode === "source" && selectedPaper
-                      ? "当前仅显示元数据摘要，请先获取 DOI 原文/PDF"
-                    : selectedPaperIsAnalyzing
-                      ? "AI 分析进行中，完成后会自动显示"
-                      : selectedPaperReport
-                        ? `已生成单篇 AI 报告 · ${selectedPaperReport.model || "AI"}`
-                        : selectedPaper
-                          ? "点击生成报告"
-                          : "选择文献后显示内容"}
-              </span>
             </div>
             {readingMode === "source" && selectedPaper?.localPdfUrl ? (
               <iframe className="pdf-reader" title={selectedPaper.title} src={selectedPaper.localPdfUrl} />
+            ) : readingMode === "source" && selectedPaper && !selectedPaperHasLocalSource ? (
+              <div className="no-fulltext-state">
+                <span>未获取到完整论文原文</span>
+                <h2>{selectedPaper.title}</h2>
+                <dl>
+                  <div><dt>DOI</dt><dd>{selectedPaper.doi || "未提供"}</dd></div>
+                  <div><dt>年份</dt><dd>{selectedPaper.year || "未知"}</dd></div>
+                  <div><dt>期刊</dt><dd>{selectedPaper.journal || selectedPaper.source || "未知"}</dd></div>
+                </dl>
+                <p>
+                  当前只保存了开放数据源返回的元数据和摘要，不等同于完整论文正文。你可以先打开 DOI/来源页面下载 PDF，
+                  再回到这里上传；系统也可以尝试自动访问 DOI/来源页，优先下载合法公开 PDF，其次抽取公开 HTML 正文。
+                </p>
+                <ol>
+                  <li>打开 DOI/来源页面，确认出版商页面是否提供合法 PDF。</li>
+                  <li>在来源页面下载 PDF 到本地。</li>
+                  <li>回到本页面，通过下面的上传入口上传 PDF。</li>
+                </ol>
+                <div className="no-fulltext-actions">
+                  <a
+                    className="wide-action ghost"
+                    href={doiUrl(selectedPaper.doi) || selectedPaper.landingPageUrl || selectedPaper.sourceUrl || "#"}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    打开来源页面
+                  </a>
+                  <button
+                    className="wide-action ghost"
+                    onClick={() => fetchFullText(selectedPaper)}
+                    disabled={selectedPaperIsFetchingFullText}
+                  >
+                    {selectedPaperIsFetchingFullText ? "正在尝试自动获取" : "尝试自动获取 DOI 原文/PDF"}
+                  </button>
+                  <UploadPdfButton paper={selectedPaper} compact />
+                </div>
+              </div>
             ) : readingMode === "analysis" && selectedPaperIsAnalyzing ? (
               <div className="analysis-loading">
                 <div className="spinner" />
@@ -777,8 +835,11 @@ export function App() {
             ) : readingMode === "analysis" && !selectedPaperReport ? (
                 <div className="analysis-loading">
                 <Brain size={28} />
-                <strong>尚未生成 AI 分析报告</strong>
-                <button className="wide-action" onClick={() => runAnalysis(selectedPaper)} disabled={!selectedPaper}>点击生成报告</button>
+                <strong>{selectedPaperAnalysisReady ? "尚未生成 AI 分析报告" : "请先获取或上传全文"}</strong>
+                <span>{selectedPaperAnalysisReady ? "报告会基于本地完整正文生成。" : "当前只有元数据/摘要，系统不会生成摘要级报告。"}</span>
+                <button className="wide-action" onClick={() => runAnalysis(selectedPaper)} disabled={!selectedPaper || !selectedPaperAnalysisReady}>
+                  {selectedPaperAnalysisReady ? "点击生成报告" : "请先获取或上传全文"}
+                </button>
               </div>
             ) : (
               <article className="markdown-reader">{renderMarkdown(readingMode === "source" ? sourceMarkdown : selectedReportMarkdown)}</article>
@@ -827,7 +888,7 @@ export function App() {
         ) : null}
 
         {activeView === "paper" ? (
-          selectedPaper ? (
+          selectedPaper && selectedPaperHasLocalSource ? (
             <div className="paper-inspector">
             <div className="paper-heading">
               <span>{selectedPaper.source}</span>
@@ -881,13 +942,17 @@ export function App() {
                   <strong>
                     {retrievalStatus.method === "pdf"
                       ? "PDF 获取成功"
+                      : retrievalStatus.method === "pdf-extract-failed"
+                        ? "PDF 已保存但未抽取到可分析正文"
                       : retrievalStatus.method === "html-fulltext"
                         ? "已获取 HTML 全文"
                         : "获取记录"}
                   </strong>
                   <span>
                     {retrievalStatus.method === "pdf"
-                      ? "已保存完整 PDF。"
+                      ? "已保存完整 PDF，并提取出可用于 AI 分析的正文。"
+                      : retrievalStatus.method === "pdf-extract-failed"
+                        ? "当前 PDF 可能是扫描版或文本不足，请确认后上传可复制文本的 PDF。"
                       : retrievalStatus.method === "html-fulltext"
                         ? "未直接拿到 PDF，已把公开页面正文保存为 Markdown。"
                         : "未发现可直接保存的完整 PDF 或正文。"}
@@ -937,6 +1002,12 @@ export function App() {
           onRefresh={() => refresh().catch(() => null)}
         />
       ) : null}
+      <ActivityCenter
+        activities={activities}
+        open={activityOpen}
+        onToggle={() => setActivityOpen((current) => !current)}
+        onRemove={removeActivity}
+      />
     </main>
   );
 }

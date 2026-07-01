@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse
 
 from .literature_runtime.analysis import create_report
 from .literature_runtime.models import AnalyzePayload, CliResult, MailTestPayload, TaskPayload
-from .literature_runtime.fulltext import fetch_fulltext_for_paper, save_paper_asset
+from .literature_runtime.fulltext import fetch_fulltext_for_paper, save_paper_asset, save_pdf_text_asset
 from .literature_runtime.repository import (
     ROOT_DIR,
 )
@@ -85,6 +85,47 @@ def normalize_all_tasks_mail_push() -> None:
         repository.save_tasks()
 
 
+def classify_source_error(error: str) -> str:
+    text = (error or "").lower()
+    if "429" in text or "too many requests" in text:
+        return "rate_limited"
+    if "503" in text or "service unavailable" in text:
+        return "service_unavailable"
+    if "500" in text or "server error" in text or "502" in text or "504" in text:
+        return "server_error"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    return "unknown"
+
+
+def summarize_source_statuses(statuses: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, dict[str, Any]] = {}
+    for item in statuses:
+        source = str(item.get("source") or "unknown")
+        bucket = summary.setdefault(
+            source,
+            {"source": source, "succeeded_count": 0, "failed_count": 0, "record_count": 0, "errors": []},
+        )
+        if item.get("status") == "succeeded":
+            bucket["succeeded_count"] += 1
+            bucket["record_count"] += int(item.get("count") or 0)
+        else:
+            bucket["failed_count"] += 1
+            if item.get("errorType") and item.get("errorType") not in bucket["errors"]:
+                bucket["errors"].append(item.get("errorType"))
+    values = list(summary.values())
+    return {
+        "sources": values,
+        "succeeded_count": sum(item["succeeded_count"] for item in values),
+        "failed_count": sum(item["failed_count"] for item in values),
+        "degraded": any(item["failed_count"] for item in values)
+        and any(item["succeeded_count"] for item in values),
+        "failure_reason": "部分数据源临时不可用，已使用可用来源继续完成任务"
+        if any(item["failed_count"] for item in values)
+        else "",
+    }
+
+
 async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trigger: str = "manual") -> dict[str, Any]:
     query = str(payload.get("query") or "").strip()
     if not query:
@@ -96,14 +137,16 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
     query_plan = await expand_queries(query)
     fetch_limit = max(120, count * 30)
     source_statuses: list[dict[str, Any]] = []
+    semaphores = {"openalex": asyncio.Semaphore(2), "crossref": asyncio.Semaphore(1)}
 
     async def fetch_job(source: str, planned: dict[str, str]) -> list[dict[str, Any]]:
         try:
-            items = (
-                await fetch_crossref(planned["query"], year_from, fetch_limit)
-                if source == "crossref"
-                else await fetch_openalex(planned["query"], year_from, fetch_limit)
-            )
+            async with semaphores[source]:
+                items = (
+                    await fetch_crossref(planned["query"], year_from, fetch_limit)
+                    if source == "crossref"
+                    else await fetch_openalex(planned["query"], year_from, fetch_limit)
+                )
             source_statuses.append(
                 {
                     "source": source,
@@ -122,13 +165,15 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
                 )
             return items
         except Exception as exc:
+            error_text = str(exc)
             source_statuses.append(
                 {
                     "source": source,
                     "query": planned["query"],
                     "querySource": planned["source"],
                     "status": "failed",
-                    "error": str(exc),
+                    "error": error_text,
+                    "errorType": classify_source_error(error_text),
                 }
             )
             return []
@@ -163,6 +208,9 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
         "queryPlan": query_plan,
         "fetchLimitPerQuery": fetch_limit,
         "sourceStatuses": source_statuses,
+        "sourceSummary": summarize_source_statuses(source_statuses),
+        "degraded": any(item.get("status") == "failed" for item in source_statuses)
+        and any(item.get("status") == "succeeded" for item in source_statuses),
         "candidateCount": len(candidates),
         "uniqueCount": len(unique),
         "duplicateCount": len(duplicates),
@@ -691,8 +739,14 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
         if task.get("notifyAfterRun"):
             if task.get("autoAnalyze"):
                 for paper in result["papers"]:
-                    report = await create_report([paper], task.get("query") or "")
-                    add_mail_delivery("analysis_report", paper, task=task, report=report)
+                    paper_with_fulltext = paper
+                    if not paper_with_fulltext.get("localFullTextPath"):
+                        paper_with_fulltext = (await fetch_fulltext_for_paper(dict(paper)))["paper"]
+                    if paper_with_fulltext.get("localFullTextPath"):
+                        report = await create_report([paper_with_fulltext], task.get("query") or "")
+                        add_mail_delivery("analysis_report", paper_with_fulltext, task=task, report=report)
+                    else:
+                        add_mail_delivery("paper_fulltext", paper_with_fulltext, task=task)
             else:
                 for paper in result["papers"]:
                     add_mail_delivery("paper_fulltext", paper, task=task)
@@ -718,9 +772,32 @@ async def analyze(payload: AnalyzePayload) -> dict[str, Any]:
     ][: max(1, payload.limit)]
     if not papers:
         raise HTTPException(status_code=400, detail={"code": "NO_LOCAL_PAPERS"})
+    missing = [paper for paper in papers if not paper.get("localFullTextPath")]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "FULLTEXT_REQUIRED",
+                "message": "请先获取或上传完整论文原文，再生成 AI 分析报告。",
+                "paperIds": [paper.get("id") for paper in missing],
+            },
+        )
     fallback_query = repository.library["scanRuns"][0].get("query", "") if repository.library["scanRuns"] else ""
     report = await create_report(papers, payload.query or fallback_query, payload.title)
     return {"report": report, "library": repository.serialize_library()}
+
+
+@router.post("/papers/{paper_id}:analyze")
+async def analyze_paper(paper_id: str, payload: AnalyzePayload | None = None) -> dict[str, Any]:
+    body = payload or AnalyzePayload(paperIds=[paper_id], limit=1)
+    return await analyze(
+        AnalyzePayload(
+            paperIds=[paper_id],
+            query=body.query,
+            title=body.title,
+            limit=1,
+        )
+    )
 
 
 @router.delete("/papers/{paper_id}")
@@ -758,6 +835,7 @@ async def upload_pdf(paper_id: str, request: Request) -> dict[str, Any]:
     pdf_path = repository.downloads_dir / f"{paper_id}.pdf"
     pdf_path.write_bytes(body)
     paper["localPdfPath"] = str(pdf_path.relative_to(ROOT_DIR)).replace("\\", "/")
+    paper = save_pdf_text_asset(paper, pdf_path, "upload")
     repository._persist_item("papers", paper)
     return {"paper": repository.serialize_paper(paper), "library": repository.serialize_library()}
 
@@ -772,6 +850,7 @@ async def upload_pdf_file(paper_id: str, file: UploadFile) -> dict[str, Any]:
     pdf_path = repository.downloads_dir / f"{paper_id}.pdf"
     pdf_path.write_bytes(await file.read())
     paper["localPdfPath"] = str(pdf_path.relative_to(ROOT_DIR)).replace("\\", "/")
+    paper = save_pdf_text_asset(paper, pdf_path, "upload")
     repository._persist_item("papers", paper)
     return {"paper": repository.serialize_paper(paper), "library": repository.serialize_library()}
 

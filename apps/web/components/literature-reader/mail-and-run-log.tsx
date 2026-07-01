@@ -20,6 +20,57 @@ function formatRunTime(iso) {
   }
 }
 
+function sourceStatusSummary(statuses) {
+  const buckets = new Map();
+  for (const item of statuses || []) {
+    const source = item.source || "unknown";
+    const bucket = buckets.get(source) || { source, ok: 0, failed: 0, count: 0, errors: new Set() };
+    if (item.status === "succeeded") {
+      bucket.ok += 1;
+      bucket.count += Number(item.count || 0);
+    } else {
+      bucket.failed += 1;
+      bucket.errors.add(item.errorType || "unknown");
+    }
+    buckets.set(source, bucket);
+  }
+  return [...buckets.values()].map((item) => ({
+    ...item,
+    errors: [...item.errors],
+    degraded: item.ok > 0 && item.failed > 0,
+  }));
+}
+
+function sourceFailureLabel(errorType) {
+  const labels = {
+    rate_limited: "限流",
+    service_unavailable: "服务不可用",
+    server_error: "服务错误",
+    timeout: "超时",
+    unknown: "未知错误",
+  };
+  return labels[errorType] || labels.unknown;
+}
+
+function SourceStatusDigest({ statuses }) {
+  const summary = sourceStatusSummary(statuses);
+  if (!summary.length) return null;
+  return (
+    <div className="source-status-digest">
+      {summary.map((item) => (
+        <div className={`source-status-chip ${item.failed ? "degraded" : "ok"}`} key={item.source}>
+          <strong>{item.source}</strong>
+          <span>
+            {item.ok ? `成功 ${item.ok} 组 / ${item.count} 条` : ""}
+            {item.ok && item.failed ? " · " : ""}
+            {item.failed ? `失败 ${item.failed} 组（${item.errors.map(sourceFailureLabel).join("、")}）` : ""}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function MailBindModal({ mailStatus, authUrl, loading, onClose, onBind, onRebind, onOpenAuthUrl, onRefresh }) {
   const bound = Boolean(mailStatus?.authorized && mailStatus.email);
   return (
@@ -105,11 +156,15 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
       {log.sourceStatuses?.length ? (
         <div className="active-run-subsection">
           <strong>来源返回</strong>
-          {log.sourceStatuses.slice(0, 10).map((item, index) => (
-            <p className={item.status === "failed" ? "error" : ""} key={`${item.source}-${item.query}-${index}`}>
-              {item.source}：{item.status === "succeeded" ? `返回 ${item.count || 0} 条` : `失败，${item.error || "未知原因"}`}
-            </p>
-          ))}
+          <SourceStatusDigest statuses={log.sourceStatuses} />
+          <details className="source-status-details">
+            <summary>查看来源详情</summary>
+            {log.sourceStatuses.map((item, index) => (
+              <p className={item.status === "failed" ? "error" : ""} key={`${item.source}-${item.query}-${index}`}>
+                {item.source} / {item.query}：{item.status === "succeeded" ? `返回 ${item.count || 0} 条` : `失败，${item.error || "未知原因"}`}
+              </p>
+            ))}
+          </details>
         </div>
       ) : null}
       {log.savedPapers?.length ? (
@@ -213,24 +268,16 @@ function canRetryMailDelivery(delivery) {
   return /confirmation token|AGENT_MAIL|MAIL_/i.test(error);
 }
 
-function MailDeliveryList({ deliveries, onConfirmMailDelivery, onConfirmPendingMailDeliveries, onRetryMailDelivery, loading }) {
+function MailDeliveryList({ deliveries, onConfirmMailDelivery, onRetryMailDelivery, loading }) {
   const latest = [...(deliveries || [])]
     .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
     .slice(0, 8);
-  const pendingCount = (deliveries || []).filter(
-    (delivery) => delivery.status === "pending_confirmation" && delivery.confirmationToken,
-  ).length;
   if (!latest.length) return null;
   return (
     <div className="mail-delivery-list">
       <div className="mail-delivery-title">
         <strong>邮箱推送记录</strong>
         <span>{latest.length} 条最近记录</span>
-        {pendingCount ? (
-          <button type="button" onClick={onConfirmPendingMailDeliveries} disabled={loading === "mail-confirm-all"}>
-            确认发送全部待确认（{pendingCount}）
-          </button>
-        ) : null}
       </div>
       {latest.map((delivery) => (
         <div className={`mail-delivery-row ${delivery.status}`} key={delivery.id}>
@@ -281,7 +328,6 @@ export function RunLogList({
   mailStatus,
   onBindMail,
   onConfirmMailDelivery,
-  onConfirmPendingMailDeliveries,
   onRetryMailDelivery,
   loading,
 }) {
@@ -317,7 +363,6 @@ export function RunLogList({
       <MailDeliveryList
         deliveries={mailDeliveries || []}
         onConfirmMailDelivery={onConfirmMailDelivery}
-        onConfirmPendingMailDeliveries={onConfirmPendingMailDeliveries}
         onRetryMailDelivery={onRetryMailDelivery}
         loading={loading}
       />
@@ -374,14 +419,18 @@ export function RunLogList({
                     {run.sourceStatuses?.length ? (
                       <div className="run-detail-section">
                         <p className="run-detail-label">数据源检索状态</p>
-                        {run.sourceStatuses.map((item, index) => (
-                          <p
-                            className={`run-detail-line ${item.status === "failed" ? "error" : ""}`}
-                            key={index}
-                          >
-                            {item.source} / {item.query || run.query}：{item.status === "succeeded" ? `成功，拉取 ${item.count} 条` : `失败 — ${item.error}`}
-                          </p>
-                        ))}
+                        <SourceStatusDigest statuses={run.sourceStatuses} />
+                        <details className="source-status-details">
+                          <summary>查看完整错误与 URL</summary>
+                          {run.sourceStatuses.map((item, index) => (
+                            <p
+                              className={`run-detail-line ${item.status === "failed" ? "error" : ""}`}
+                              key={index}
+                            >
+                              {item.source} / {item.query || run.query}：{item.status === "succeeded" ? `成功，拉取 ${item.count} 条` : `失败 — ${item.error}`}
+                            </p>
+                          ))}
+                        </details>
                       </div>
                     ) : null}
                     {run.duplicateTitles?.length ? (

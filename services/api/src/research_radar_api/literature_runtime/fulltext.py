@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -30,6 +31,7 @@ def paper_markdown(paper: dict[str, Any]) -> str:
             f"- 开放获取: {'是' if paper.get('openAccess') else '否'}",
             f"- DOI/来源链接: {link or '无'}",
             f"- 本地 PDF: {paper.get('localPdfPath') or '未下载'}",
+            f"- 正文状态: {paper.get('fullTextStatus') or 'metadata_only'}",
             "",
             "## Authors",
             "",
@@ -53,6 +55,8 @@ def paper_markdown(paper: dict[str, Any]) -> str:
 
 async def save_paper_asset(paper: dict[str, Any], download_open_pdf: bool) -> dict[str, Any]:
     enriched = dict(paper)
+    enriched.setdefault("fullTextStatus", "metadata_only")
+    enriched.setdefault("fullTextSource", "none")
     if download_open_pdf and enriched.get("openAccess"):
         enriched = (await fetch_fulltext_for_paper(enriched, update_repository=False))["paper"]
     markdown_path = repository.papers_dir / f"{slug(enriched.get('title'))}-{enriched['id']}.md"
@@ -60,6 +64,47 @@ async def save_paper_asset(paper: dict[str, Any], download_open_pdf: bool) -> di
     enriched["localMarkdownPath"] = str(markdown_path.relative_to(ROOT_DIR)).replace("\\", "/")
     enriched["savedAt"] = now_iso()
     return enriched
+
+
+def extract_pdf_text(pdf_path: Path) -> str:
+    try:
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+
+        reader = PdfReader(str(pdf_path))
+        pages = []
+        for page in reader.pages[:80]:
+            pages.append(page.extract_text() or "")
+        text = "\n\n".join(page.strip() for page in pages if page.strip())
+        if len(text.strip()) >= 800:
+            return text
+    except Exception:
+        pass
+    try:
+        raw = pdf_path.read_bytes()
+        decoded = raw.decode("utf-8", errors="ignore")
+        decoded = re.sub(r"[^\S\r\n]+", " ", decoded)
+        decoded = re.sub(r"\n{3,}", "\n\n", decoded)
+        if len(decoded.strip()) >= 800:
+            return decoded.strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def save_pdf_text_asset(paper: dict[str, Any], pdf_path: Path, source: str = "pdf") -> dict[str, Any]:
+    text = extract_pdf_text(pdf_path)
+    if not text:
+        paper["fullTextStatus"] = "extract_failed"
+        paper["fullTextSource"] = source
+        return paper
+    title = paper.get("title") or "Full text"
+    md = f"# {title}\n\n{text[:80000]}\n"
+    full_path = repository.papers_dir / f"{slug(title)}-{paper['id']}-fulltext.md"
+    full_path.write_text(md, encoding="utf-8")
+    paper["localFullTextPath"] = str(full_path.relative_to(ROOT_DIR)).replace("\\", "/")
+    paper["fullTextStatus"] = "ready"
+    paper["fullTextSource"] = source
+    return paper
 
 
 
@@ -109,6 +154,7 @@ async def fetch_fulltext_for_paper(paper: dict[str, Any], update_repository: boo
                     pdf_path.write_bytes(response.content)
                     paper["localPdfPath"] = str(pdf_path.relative_to(ROOT_DIR)).replace("\\", "/")
                     paper["pdfUrl"] = url
+                    paper = save_pdf_text_asset(paper, pdf_path, "pdf")
                     break
                 html_text = response.text
                 pdf_match = re.search(r'href=["\']([^"\']+\.pdf[^"\']*)["\']', html_text, re.I)
@@ -122,9 +168,17 @@ async def fetch_fulltext_for_paper(paper: dict[str, Any], update_repository: boo
                     full_path = repository.papers_dir / f"{slug(paper.get('title'))}-{paper['id']}-fulltext.md"
                     full_path.write_text(md, encoding="utf-8")
                     paper["localFullTextPath"] = str(full_path.relative_to(ROOT_DIR)).replace("\\", "/")
+                    paper["fullTextStatus"] = "ready"
+                    paper["fullTextSource"] = "html"
                     break
             except Exception as exc:
                 attempts.append({"url": url, "status": "failed", "error": str(exc)})
+    if not paper.get("localFullTextPath") and not paper.get("fullTextStatus"):
+        paper["fullTextStatus"] = "metadata_only"
+        paper["fullTextSource"] = "none"
+    if not paper.get("localFullTextPath") and paper.get("fullTextStatus") not in {"extract_failed"}:
+        paper["fullTextStatus"] = "unavailable" if attempts else "metadata_only"
+        paper["fullTextSource"] = paper.get("fullTextSource") or "none"
     if update_repository:
         for index, item in enumerate(repository.library["papers"]):
             if item["id"] == paper["id"]:
@@ -133,8 +187,20 @@ async def fetch_fulltext_for_paper(paper: dict[str, Any], update_repository: boo
                 break
     return {
         "paper": repository.serialize_paper(paper),
-        "method": "pdf" if paper.get("localPdfPath") else "html-fulltext" if paper.get("localFullTextPath") else "",
-        "retrieval": {"attempts": attempts},
+        "method": "pdf"
+        if paper.get("localPdfPath") and paper.get("localFullTextPath")
+        else "pdf-extract-failed"
+        if paper.get("localPdfPath")
+        else "html-fulltext"
+        if paper.get("localFullTextPath")
+        else "",
+        "retrieval": {
+            "attempts": attempts,
+            "fullTextStatus": paper.get("fullTextStatus") or "metadata_only",
+            "nextAction": ""
+            if paper.get("localFullTextPath")
+            else "请打开 DOI/来源页面下载 PDF 后上传，或稍后重试自动获取。",
+        },
     }
 
 

@@ -187,6 +187,11 @@ export function LibraryGraphView({
     if (!canvasSize.width || !canvasSize.height || !nodes.length) return [];
     const margin = 42;
     const buckets = new Map();
+    const groupNodes = new Map(
+      nodes
+        .filter((node) => node.type === "taskNode")
+        .map((node) => [node.data?.label || "未归类文献", node]),
+    );
 
     for (const node of nodes) {
       if (node.type !== "paperNode") continue;
@@ -203,10 +208,11 @@ export function LibraryGraphView({
         y < margin ? margin - y : y > canvasSize.height - margin ? y - (canvasSize.height - margin) : 0,
       );
       const label = node.data?.groupLabel || "未归类文献";
-      const bucket = buckets.get(label) || { key: label, label, direction: key, count: 0, target: node, distance };
+      const groupTarget = groupNodes.get(label) || node;
+      const bucket = buckets.get(label) || { key: label, label, direction: key, count: 0, target: groupTarget, distance };
       bucket.count += 1;
       if (distance < bucket.distance) {
-        bucket.target = node;
+        bucket.target = groupTarget;
         bucket.distance = distance;
         bucket.direction = key;
       }
@@ -274,7 +280,6 @@ export function LibraryGraphView({
     const center = item.target?.data?.center;
     if (!center || !flowRef.current?.setCenter) return;
     flowRef.current.setCenter(center.x, center.y, { zoom: Math.max(viewport.zoom, 0.96), duration: 520 });
-    if (item.target.type === "paperNode") onFocusPaper(item.target.data.paper);
   }
 
   return (

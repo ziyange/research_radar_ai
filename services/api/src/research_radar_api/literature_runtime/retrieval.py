@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import json
@@ -330,7 +331,8 @@ async def fetch_openalex(query: str, year_from: int | None, limit: int) -> list[
                 params["filter"] = f"from_publication_date:{year_from}-01-01"
             if get_settings().openalex_email:
                 params["mailto"] = get_settings().openalex_email
-            response = await client.get(
+            response = await get_with_retry(
+                client,
                 "https://api.openalex.org/works",
                 params=params,
                 headers={"User-Agent": "ResearchRadarAI-LiteratureReader/0.1"},
@@ -358,7 +360,8 @@ async def fetch_crossref(query: str, year_from: int | None, limit: int) -> list[
             }
             if year_from:
                 params["filter"] = f"from-pub-date:{year_from}-01-01"
-            response = await client.get(
+            response = await get_with_retry(
+                client,
                 "https://api.crossref.org/works",
                 params=params,
                 headers={"User-Agent": "ResearchRadarAI-LiteratureReader/0.1 (mailto:dev@example.com)"},
@@ -369,6 +372,33 @@ async def fetch_crossref(query: str, year_from: int | None, limit: int) -> list[
             if len(page_items) < rows:
                 break
     return items[:limit]
+
+
+async def get_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+    headers: dict[str, str],
+) -> httpx.Response:
+    last_response: httpx.Response | None = None
+    for attempt in range(3):
+        response = await client.get(url, params=params, headers=headers)
+        last_response = response
+        if response.status_code not in {429, 500, 502, 503, 504}:
+            response.raise_for_status()
+            return response
+        if attempt < 2:
+            retry_after = response.headers.get("retry-after")
+            try:
+                delay = min(8.0, float(retry_after or 0))
+            except ValueError:
+                delay = 0
+            if not delay:
+                delay = 0.8 * (attempt + 1)
+            await asyncio.sleep(delay)
+    assert last_response is not None
+    last_response.raise_for_status()
+    return last_response
 
 
 def dedupe(existing: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

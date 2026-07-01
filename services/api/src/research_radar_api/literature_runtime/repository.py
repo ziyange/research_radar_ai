@@ -112,6 +112,10 @@ class LiteratureRepository:
 
     def serialize_paper(self, paper: dict[str, Any]) -> dict[str, Any]:
         item = dict(paper)
+        if not item.get("fullTextStatus"):
+            item["fullTextStatus"] = "ready" if item.get("localFullTextPath") else "metadata_only"
+        if not item.get("fullTextSource"):
+            item["fullTextSource"] = "html" if item.get("localFullTextPath") else "none"
         if item.get("localMarkdownPath"):
             item["localMarkdownUrl"] = self.file_url(item["localMarkdownPath"])
         if item.get("localFullTextPath"):

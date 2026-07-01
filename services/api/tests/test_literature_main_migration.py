@@ -8,6 +8,34 @@ from research_radar_api.main import app
 client = TestClient(app)
 
 
+def add_fulltext_test_paper(paper_id: str = "paper_test_fulltext") -> dict:
+    full_path = literature.repository.papers_dir / f"{paper_id}-fulltext.md"
+    full_path.write_text(
+        "# Test Full Text\n\n"
+        + ("This full text describes methods, results, evidence and conclusions. " * 80),
+        encoding="utf-8",
+    )
+    paper = {
+        "id": paper_id,
+        "title": "Full text acceptance paper",
+        "doi": f"10.0000/{paper_id}",
+        "year": 2026,
+        "journal": "Local Test Journal",
+        "source": "Local",
+        "authors": ["Test Author"],
+        "abstract": "This is an abstract.",
+        "localFullTextPath": str(full_path.relative_to(literature.ROOT_DIR)).replace("\\", "/"),
+        "fullTextStatus": "ready",
+        "fullTextSource": "html",
+    }
+    literature.repository.library["papers"] = [
+        paper,
+        *[item for item in literature.repository.library["papers"] if item["id"] != paper_id],
+    ]
+    literature.repository._persist_item("papers", paper)
+    return paper
+
+
 def test_literature_library_imports_demo_assets() -> None:
     response = client.get("/api/v1/literature/library")
 
@@ -60,9 +88,60 @@ def test_literature_task_crud_roundtrip() -> None:
     assert all(item["id"] != task["id"] for item in deleted.json()["tasks"])
 
 
+def test_literature_scan_degrades_when_openalex_fails(monkeypatch) -> None:
+    async def fake_openalex(query, year_from, limit):  # noqa: ANN001, ARG001
+        raise RuntimeError("Server error '503 Service Unavailable'")
+
+    async def fake_crossref(query, year_from, limit):  # noqa: ANN001, ARG001
+        return [
+            {
+                "id": "paper_test_crossref_degraded",
+                "title": "Crossref fallback food safety paper",
+                "doi": "10.0000/crossref-degraded",
+                "year": 2026,
+                "journal": "Crossref Test",
+                "authors": ["Fallback Author"],
+                "abstract": "Food safety contaminants review evidence.",
+                "keywords": ["food safety"],
+                "source": "Crossref",
+                "sourceUrl": "https://doi.org/10.0000/crossref-degraded",
+                "landingPageUrl": "https://doi.org/10.0000/crossref-degraded",
+                "openAccess": False,
+                "citedByCount": 0,
+                "rawScore": 95,
+            }
+        ]
+
+    monkeypatch.setattr(literature, "fetch_openalex", fake_openalex)
+    monkeypatch.setattr(literature, "fetch_crossref", fake_crossref)
+    async def fake_expand_queries(query):  # noqa: ANN001, ARG001
+        return [{"query": "food safety", "source": "test"}]
+
+    monkeypatch.setattr(literature, "expand_queries", fake_expand_queries)
+
+    response = client.post(
+        "/api/v1/literature/scan",
+        json={
+            "query": "food safety",
+            "count": 1,
+            "yearFrom": 2021,
+            "minScore": 1,
+            "sources": ["openalex", "crossref"],
+            "downloadOpenPdf": False,
+        },
+    )
+
+    assert response.status_code == 200
+    run = response.json()["run"]
+    assert run["savedCount"] == 1
+    assert run["degraded"] is True
+    assert run["sourceSummary"]["failed_count"] == 1
+    assert any(item.get("errorType") == "service_unavailable" for item in run["sourceStatuses"])
+
+
 def test_literature_mock_analysis_generates_markdown_report() -> None:
-    library = client.get("/api/v1/literature/library").json()
-    paper_id = library["papers"][0]["id"]
+    paper = add_fulltext_test_paper()
+    paper_id = paper["id"]
 
     response = client.post(
         "/api/v1/literature/analyze",
@@ -74,6 +153,62 @@ def test_literature_mock_analysis_generates_markdown_report() -> None:
     assert paper_id in report["paperIds"]
     assert "AI 阅读报告" in report["markdown"]
     assert "```mermaid" in report["markdown"]
+
+
+def test_literature_analysis_requires_fulltext() -> None:
+    paper = {
+        "id": "paper_test_metadata_only",
+        "title": "Metadata only paper",
+        "doi": "10.0000/metadata-only",
+        "year": 2026,
+        "journal": "Local Test Journal",
+        "source": "Local",
+        "abstract": "Only an abstract exists.",
+        "fullTextStatus": "metadata_only",
+    }
+    literature.repository.library["papers"] = [
+        paper,
+        *[item for item in literature.repository.library["papers"] if item["id"] != paper["id"]],
+    ]
+    literature.repository._persist_item("papers", paper)
+
+    response = client.post(
+        "/api/v1/literature/analyze",
+        json={"paperIds": [paper["id"]], "query": "acceptance", "limit": 1},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "FULLTEXT_REQUIRED"
+
+
+def test_literature_upload_pdf_extracts_fulltext() -> None:
+    paper = {
+        "id": "paper_test_pdf_upload",
+        "title": "PDF upload extraction paper",
+        "doi": "10.0000/pdf-upload",
+        "year": 2026,
+        "journal": "Local Test Journal",
+        "source": "Local",
+        "abstract": "PDF upload abstract.",
+        "fullTextStatus": "metadata_only",
+    }
+    literature.repository.library["papers"] = [
+        paper,
+        *[item for item in literature.repository.library["papers"] if item["id"] != paper["id"]],
+    ]
+    literature.repository._persist_item("papers", paper)
+    content = b"%PDF-1.4\n" + (b"Extractable PDF text for research evidence. " * 80)
+
+    response = client.post(
+        f"/api/v1/literature/papers/{paper['id']}/upload-pdf",
+        files={"file": ("paper.pdf", content, "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    updated = response.json()["paper"]
+    assert updated["localPdfUrl"]
+    assert updated["localFullTextUrl"]
+    assert updated["fullTextStatus"] == "ready"
 
 
 def test_literature_mail_test_requires_recipient_when_no_default() -> None:
