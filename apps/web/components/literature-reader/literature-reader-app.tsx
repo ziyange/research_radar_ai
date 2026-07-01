@@ -361,7 +361,7 @@ export function App() {
             ? [{ key: "analysis", status: "done", text: "AI 分析已由后端逐篇处理并落盘。" }]
             : []),
           ...(pushReady
-            ? [{ key: "mail", status: "done", text: `邮箱推送已生成 ${data.mailDeliveries?.length || 0} 条记录。` }]
+            ? [{ key: "mail", status: "done", text: data.taskDigestDelivery ? "任务汇总邮件已生成。" : "邮箱推送未生成。" }]
             : []),
         ],
       });
@@ -370,7 +370,7 @@ export function App() {
         tone: data.run.savedCount > 0 ? "success" : "warning",
         message:
           data.run.savedCount > 0
-            ? `已保存 ${data.run.savedCount} 篇${pushReady ? `，生成 ${data.mailDeliveries?.length || 0} 条邮箱推送` : ""}`
+            ? `已保存 ${data.run.savedCount} 篇${pushReady ? "，生成任务汇总邮件" : ""}`
             : "未发现新的可入库文献",
       });
     } catch (err) {

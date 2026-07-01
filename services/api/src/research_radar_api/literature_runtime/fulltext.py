@@ -66,39 +66,79 @@ async def save_paper_asset(paper: dict[str, Any], download_open_pdf: bool) -> di
     return enriched
 
 
-def extract_pdf_text(pdf_path: Path) -> str:
+def extract_pdf_text(pdf_path: Path) -> tuple[str, dict[str, Any]]:
+    metadata: dict[str, Any] = {
+        "method": "pypdf",
+        "pageCount": 0,
+        "extractedPages": 0,
+        "charCount": 0,
+        "error": "",
+    }
     try:
         from pypdf import PdfReader  # type: ignore[import-not-found]
 
         reader = PdfReader(str(pdf_path))
+        metadata["pageCount"] = len(reader.pages)
         pages = []
         for page in reader.pages[:80]:
             pages.append(page.extract_text() or "")
         text = "\n\n".join(page.strip() for page in pages if page.strip())
+        metadata["extractedPages"] = len([page for page in pages if page.strip()])
+        metadata["charCount"] = len(text.strip())
         if len(text.strip()) >= 800:
-            return text
-    except Exception:
-        pass
+            return text, metadata
+    except Exception as exc:
+        metadata["error"] = str(exc)
     try:
         raw = pdf_path.read_bytes()
         decoded = raw.decode("utf-8", errors="ignore")
         decoded = re.sub(r"[^\S\r\n]+", " ", decoded)
         decoded = re.sub(r"\n{3,}", "\n\n", decoded)
+        metadata["method"] = "raw-decode-fallback"
+        metadata["charCount"] = len(decoded.strip())
         if len(decoded.strip()) >= 800:
-            return decoded.strip()
-    except Exception:
-        return ""
-    return ""
+            return decoded.strip(), metadata
+    except Exception as exc:
+        metadata["error"] = str(exc)
+        return "", metadata
+    if not metadata["error"]:
+        metadata["error"] = "PDF 文本不足 800 字，可能是扫描版或加密/图片型 PDF。"
+    return "", metadata
 
 
 def save_pdf_text_asset(paper: dict[str, Any], pdf_path: Path, source: str = "pdf") -> dict[str, Any]:
-    text = extract_pdf_text(pdf_path)
+    text, metadata = extract_pdf_text(pdf_path)
+    paper["fullTextExtraction"] = {
+        **metadata,
+        "source": source,
+        "pdfPath": str(pdf_path.relative_to(ROOT_DIR)).replace("\\", "/"),
+    }
     if not text:
         paper["fullTextStatus"] = "extract_failed"
         paper["fullTextSource"] = source
+        paper["fullTextError"] = metadata.get("error") or "PDF 文本抽取失败。"
         return paper
     title = paper.get("title") or "Full text"
-    md = f"# {title}\n\n{text[:80000]}\n"
+    md = "\n".join(
+        [
+            f"# {title}",
+            "",
+            "## 全文来源说明",
+            "",
+            f"- 来源类型: PDF {source}",
+            f"- PDF 路径: {paper['fullTextExtraction']['pdfPath']}",
+            f"- 抽取方式: {metadata.get('method') or 'unknown'}",
+            f"- PDF 页数: {metadata.get('pageCount') or '未知'}",
+            f"- 提取页数: {metadata.get('extractedPages') or '未知'}",
+            f"- 可读字符数: {metadata.get('charCount') or len(text)}",
+            "- 限制: 本系统读取的是 PDF 可复制文本；扫描页、图片、复杂表格和图像不会被完整理解。",
+            "",
+            "## PDF 可读正文",
+            "",
+            text[:80000],
+            "",
+        ]
+    )
     full_path = repository.papers_dir / f"{slug(title)}-{paper['id']}-fulltext.md"
     full_path.write_text(md, encoding="utf-8")
     paper["localFullTextPath"] = str(full_path.relative_to(ROOT_DIR)).replace("\\", "/")

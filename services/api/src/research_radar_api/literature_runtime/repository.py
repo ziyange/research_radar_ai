@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -10,14 +9,11 @@ from research_radar_api.settings import get_settings
 
 
 ROOT_DIR = Path(__file__).resolve().parents[5]
-IMPORTED_DATA_DIR = ROOT_DIR / "storage" / "literature" / "imported-local-data"
 
 
 def resolve_reader_file(relative: str, storage_root: Path | None = None) -> Path | None:
     normalized = relative.replace("\\", "/").lstrip("/")
     candidates: list[Path] = []
-    if normalized.startswith("local-data/"):
-        candidates.append((IMPORTED_DATA_DIR / normalized.removeprefix("local-data/")).resolve())
     candidates.append((ROOT_DIR / normalized).resolve())
     if storage_root is not None:
         candidates.append((storage_root / normalized).resolve())
@@ -70,22 +66,8 @@ class LiteratureRepository:
                 self.library[key] = payloads
             loaded = loaded or bool(payloads)
         if not loaded:
-            self._import_demo_data()
-
-    def _import_demo_data(self) -> None:
-        library_path = IMPORTED_DATA_DIR / "library.json"
-        task_path = IMPORTED_DATA_DIR / "tasks.json"
-        if library_path.exists():
-            payload = json.loads(library_path.read_text(encoding="utf-8"))
-            for key in ["papers", "scanRuns", "reports", "mailDeliveries"]:
-                self.library[key] = payload.get(key) or []
-                for item in self.library[key]:
-                    self._persist_item(key, item)
-        if task_path.exists():
-            payload = json.loads(task_path.read_text(encoding="utf-8"))
-            self.tasks = payload.get("tasks") if isinstance(payload, dict) else payload
-            for task in self.tasks:
-                self._persist_item("tasks", task)
+            self.library = {"papers": [], "scanRuns": [], "reports": [], "mailDeliveries": []}
+            self.tasks = []
 
     def _persist_item(self, key: str, item: dict[str, Any]) -> None:
         entity_type = self.entity_types[key]

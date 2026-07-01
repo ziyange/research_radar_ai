@@ -458,6 +458,10 @@ def first_day_diagnosis(project_id: str, request: Request, user: User = Depends(
             raise HTTPException(status_code=404, detail="Profile not found")
         profile = sorted(profiles, key=lambda item: item.version)[-1]
     recs = store.create_recommendations(project.id, profile.id)
+    method_transfer = [item for item in recs if item.channel == "method_transfer"][:2]
+    if len(method_transfer) < 2:
+        seen_ids = {item.id for item in method_transfer}
+        method_transfer.extend([item for item in recs[3:] if item.id not in seen_ids][: 2 - len(method_transfer)])
     return envelope(
         request,
         {
@@ -470,10 +474,10 @@ def first_day_diagnosis(project_id: str, request: Request, user: User = Depends(
             "keywords_zh": profile.keywords_zh,
             "keywords_en": profile.keywords_en,
             "highly_related_papers": recs[:3],
-            "method_transfer_papers": [item for item in recs if item.channel == "method_transfer"][:2],
-            "research_gap_candidate": "二胺改性后界面键合强度与热压窗口的系统比较仍不足。",
-            "technical_route": "脱木质素 -> 高碘酸钠氧化 -> 二胺改性 -> 热压成型 -> 性能评价",
-            "knowledge_gap": "缺少不同氧化程度、二胺种类和热压参数之间的可比证据。",
+            "method_transfer_papers": method_transfer,
+            "research_gap_candidate": "当前方向中关键变量、评价指标和对照证据之间的系统比较仍不足。",
+            "technical_route": "研究对象 -> 关键方法 -> 对照条件 -> 性能或效果评价 -> 证据沉淀",
+            "knowledge_gap": "缺少不同方法参数、材料/数据条件和评价指标之间的可比证据。",
         },
     )
 

@@ -9,6 +9,7 @@ import shutil
 import smtplib
 import subprocess
 import time
+import zipfile
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -402,6 +403,9 @@ def send_smtp_delivery(delivery: dict[str, Any], body_path: Path) -> str:
 
 
 def delivery_subject(kind: str, paper: dict[str, Any], task: dict[str, Any] | None = None) -> str:
+    if kind == "task_digest":
+        title = (task or {}).get("name") or (task or {}).get("query") or "采集任务"
+        return f"[研知雷达] {str(title)[:58]} · {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     prefix = "AI分析" if kind == "analysis_report" else "完整文献" if kind == "paper_fulltext" else "测试邮件"
     title = (
         paper.get("titleZh")
@@ -456,6 +460,160 @@ def delivery_attachments(delivery_id: str, paper: dict[str, Any], report: dict[s
     return attachments
 
 
+def readable_datetime(value: str | None) -> str:
+    if not value:
+        return now_iso()
+    return value.replace("T", " ").replace("+00:00", " UTC")
+
+
+def source_summary_lines(run: dict[str, Any]) -> list[str]:
+    statuses = run.get("sourceStatuses") or []
+    if not statuses:
+        return ["- 来源状态: 未记录"]
+    lines = []
+    for item in statuses:
+        if item.get("status") == "succeeded":
+            lines.append(f"- {item.get('source')} / {item.get('query')}: 成功，返回 {item.get('count') or 0} 条")
+        else:
+            lines.append(
+                f"- {item.get('source')} / {item.get('query')}: 失败，{item.get('errorType') or 'unknown'}"
+            )
+    return lines
+
+
+def task_digest_markdown(
+    task: dict[str, Any],
+    run: dict[str, Any],
+    papers: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+) -> str:
+    report_by_paper: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        for paper_id in report.get("paperIds") or []:
+            report_by_paper[str(paper_id)] = report
+    lines = [
+        f"# {(task or {}).get('name') or (task or {}).get('query') or '采集任务'}",
+        "",
+        "## 任务信息",
+        "",
+        "| 字段 | 内容 |",
+        "| --- | --- |",
+        f"| 任务名称 | {(task or {}).get('name') or '未命名任务'} |",
+        f"| 执行时间 | {readable_datetime(run.get('createdAt'))} |",
+        f"| 研究方向 | {(task or {}).get('query') or run.get('query') or ''} |",
+        f"| 目标篇数 | {run.get('count') or (task or {}).get('count') or ''} |",
+        f"| 起始年份 | {run.get('yearFrom') or (task or {}).get('yearFrom') or '不限'} |",
+        f"| 最低评分 | {run.get('minScore') if run.get('minScore') is not None else (task or {}).get('minScore', '')} |",
+        f"| 数据源 | {', '.join(run.get('sources') or (task or {}).get('sources') or [])} |",
+        f"| 是否 AI 分析 | {'是' if (task or {}).get('autoAnalyze') else '否'} |",
+        "",
+        "## 执行结果",
+        "",
+        f"- 保存文献: {run.get('savedCount') or 0} 篇",
+        f"- 候选文献: {run.get('candidateCount') or 0} 篇",
+        f"- 去重后新文献: {run.get('uniqueCount') or 0} 篇",
+        f"- 重复文献: {run.get('duplicateCount') or 0} 篇",
+        f"- 是否降级: {'是' if run.get('degraded') else '否'}",
+        f"- 是否达到目标: {'是' if run.get('targetMet') else '否'}",
+        "",
+        "## 来源状态",
+        "",
+        *source_summary_lines(run),
+        "",
+        "## 文献列表",
+        "",
+    ]
+    for index, paper in enumerate(papers, 1):
+        report = report_by_paper.get(str(paper.get("id")))
+        lines.extend(
+            [
+                f"### {index}. {paper.get('title') or 'Untitled'}",
+                "",
+                f"- DOI: {paper.get('doi') or '未提供'}",
+                f"- 年份: {paper.get('year') or '未知'}",
+                f"- 期刊: {paper.get('journal') or paper.get('source') or '未知'}",
+                f"- 评分: {round(paper.get('rawScore') or 0)}",
+                f"- 全文: {paper.get('localPdfPath') or paper.get('localFullTextPath') or paper.get('localMarkdownPath') or '未获取'}",
+                f"- AI 分析: {report.get('markdownPath') if report else ('未开启或全文不足，未生成' if (task or {}).get('autoAnalyze') else '未开启')}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## 任务 AI 分析总结",
+            "",
+            "本轮先按任务汇总执行结果和附件。后续可在此处接入跨文献任务级总结：研究趋势、共同方法、差异点、研究空白和下一步建议。",
+            "",
+            "## 附件说明",
+            "",
+            "- `fulltexts-*.zip`: 文献 PDF；若没有 PDF，则放入系统保存的全文/元数据 Markdown。",
+            "- `analysis-reports-*.zip`: 开启 AI 分析且成功生成报告时，包含单篇 AI 报告 Markdown。",
+            "- `manifest-*.md`: 附件清单和文献对应关系。",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def zip_files(zip_path: Path, files: list[tuple[str, Path]]) -> str | None:
+    existing = [(name, path) for name, path in files if path.exists() and path.is_file()]
+    if not existing:
+        return None
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        used: set[str] = set()
+        for index, (name, path) in enumerate(existing, 1):
+            arcname = name
+            if arcname in used:
+                arcname = f"{index}-{arcname}"
+            used.add(arcname)
+            archive.write(path, arcname=arcname)
+    return str(zip_path.relative_to(ROOT_DIR)).replace("\\", "/")
+
+
+def build_task_digest_attachments(
+    delivery_id: str,
+    run: dict[str, Any],
+    papers: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+) -> list[str]:
+    attachments: list[str] = []
+    fulltext_files: list[tuple[str, Path]] = []
+    for index, paper in enumerate(papers, 1):
+        relative = paper.get("localPdfPath") or paper.get("localFullTextPath") or paper.get("localMarkdownPath")
+        path = resolve_reader_file(str(relative or ""))
+        if path:
+            suffix = path.suffix or ".md"
+            fulltext_files.append((f"{index:02d}-{slug(paper.get('title'), 48)}{suffix}", path))
+    fulltexts_zip = zip_files(repository.mail_dir / f"fulltexts-{run.get('id') or delivery_id}.zip", fulltext_files)
+    if fulltexts_zip:
+        attachments.append(fulltexts_zip)
+    report_files: list[tuple[str, Path]] = []
+    for index, report in enumerate(reports, 1):
+        path = resolve_reader_file(str(report.get("markdownPath") or ""))
+        if path:
+            report_files.append((f"{index:02d}-{slug(report.get('title'), 48)}.md", path))
+    reports_zip = zip_files(repository.mail_dir / f"analysis-reports-{run.get('id') or delivery_id}.zip", report_files)
+    if reports_zip:
+        attachments.append(reports_zip)
+    manifest_path = repository.mail_dir / f"manifest-{run.get('id') or delivery_id}.md"
+    manifest_lines = [
+        f"# 任务附件清单 {run.get('id') or delivery_id}",
+        "",
+        "## 文献",
+        "",
+    ]
+    for index, paper in enumerate(papers, 1):
+        manifest_lines.append(
+            f"{index}. {paper.get('title') or 'Untitled'} | DOI: {paper.get('doi') or '未提供'} | 文件: {paper.get('localPdfPath') or paper.get('localFullTextPath') or paper.get('localMarkdownPath') or '无'}"
+        )
+    manifest_lines.extend(["", "## AI 报告", ""])
+    for index, report in enumerate(reports, 1):
+        manifest_lines.append(f"{index}. {report.get('title') or report.get('id')} | {report.get('markdownPath') or '无'}")
+    manifest_path.write_text("\n".join(manifest_lines), encoding="utf-8")
+    attachments.append(str(manifest_path.relative_to(ROOT_DIR)).replace("\\", "/"))
+    return attachments[:3]
+
+
 def add_mail_delivery(kind: str, paper: dict[str, Any], task: dict[str, Any] | None = None, report: dict[str, Any] | None = None, recipients: list[str] | None = None) -> dict[str, Any]:
     id_ = f"mail_{uuid4()}"
     subject = delivery_subject(kind, paper, task)
@@ -477,6 +635,50 @@ def add_mail_delivery(kind: str, paper: dict[str, Any], task: dict[str, Any] | N
         "markdownPath": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
         "bodyFile": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
         "attachments": delivery_attachments(id_, paper, report),
+        "status": "queued",
+        "confirmationToken": "",
+        "confirmationSummary": "",
+        "error": "",
+        "createdAt": now_iso(),
+        "sentAt": "",
+    }
+    repository.library["mailDeliveries"] = [delivery, *repository.library["mailDeliveries"]][:500]
+    repository._persist_item("mailDeliveries", delivery)
+    return attempt_mail_delivery(id_)
+
+
+def add_task_digest_delivery(
+    task: dict[str, Any],
+    run: dict[str, Any],
+    papers: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    id_ = f"mail_{uuid4()}"
+    task_title = task.get("name") or task.get("query") or "采集任务"
+    run_time = readable_datetime(run.get("createdAt"))[:16]
+    subject = f"[研知雷达] {str(task_title)[:58]} · {run_time}"
+    body = task_digest_markdown(task, run, papers, reports)
+    body_path = repository.mail_dir / f"{slug(subject)}-{id_}.md"
+    body_path.write_text(body, encoding="utf-8")
+    attachments = build_task_digest_attachments(id_, run, papers, reports)
+    delivery = {
+        "id": id_,
+        "kind": "task_digest",
+        "taskId": task.get("id"),
+        "runId": run.get("id"),
+        "paperId": None,
+        "paperIds": [paper.get("id") for paper in papers],
+        "reportId": None,
+        "reportIds": [report.get("id") for report in reports],
+        "recipient": "",
+        "recipients": recipients_for_task(task),
+        "cc": mail_copy_for_task(task, "ccEmails"),
+        "bcc": mail_copy_for_task(task, "bccEmails"),
+        "subject": subject,
+        "markdownPath": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
+        "summaryMarkdownPath": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
+        "bodyFile": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
+        "attachments": attachments,
         "status": "queued",
         "confirmationToken": "",
         "confirmationSummary": "",
@@ -737,19 +939,21 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
         task["lastRunSavedCount"] = result["run"]["savedCount"]
         task["lastRunId"] = result["run"]["id"]
         if task.get("notifyAfterRun"):
+            digest_papers: list[dict[str, Any]] = []
+            digest_reports: list[dict[str, Any]] = []
             if task.get("autoAnalyze"):
                 for paper in result["papers"]:
                     paper_with_fulltext = paper
                     if not paper_with_fulltext.get("localFullTextPath"):
                         paper_with_fulltext = (await fetch_fulltext_for_paper(dict(paper)))["paper"]
+                    digest_papers.append(paper_with_fulltext)
                     if paper_with_fulltext.get("localFullTextPath"):
                         report = await create_report([paper_with_fulltext], task.get("query") or "")
-                        add_mail_delivery("analysis_report", paper_with_fulltext, task=task, report=report)
-                    else:
-                        add_mail_delivery("paper_fulltext", paper_with_fulltext, task=task)
+                        digest_reports.append(report)
             else:
-                for paper in result["papers"]:
-                    add_mail_delivery("paper_fulltext", paper, task=task)
+                digest_papers = list(result["papers"])
+            delivery = add_task_digest_delivery(task, result["run"], digest_papers, digest_reports)
+            result["taskDigestDelivery"] = delivery
         repository._persist_item("tasks", task)
         result["tasks"] = repository.tasks
         result["mailDeliveries"] = repository.serialize_library()["mailDeliveries"]

@@ -50,7 +50,7 @@ def build_weekly_content(
         "high_value_papers": high_value[:7],
         "trends": [
             f"精确相关论文 {exact_count} 篇，方法迁移论文 {method_count} 篇。",
-            "高碘酸盐氧化、二胺交联和热压窗口仍是本周主要信号。",
+            "高相关方法、评价指标和研究空白变化仍是本周主要信号。",
         ],
         "knowledge_growth": knowledge_growth,
         "feedback_changes": {

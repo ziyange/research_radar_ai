@@ -222,7 +222,7 @@ export function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus 
                 <div className="mail-push-head">
                   <span className="switch-card-text">
                     <strong>推送邮箱</strong>
-                    <small>{mailBound ? "任务完成后逐条推送文献或 AI 分析" : "请先在采集任务页绑定 Agent 邮箱"}</small>
+                    <small>{mailBound ? "任务完成后统一发送任务总结与附件包" : "请先在采集任务页绑定 Agent 邮箱"}</small>
                   </span>
                   <button
                     type="button"
@@ -262,7 +262,7 @@ export function TaskModal({ mode, initial, loading, onClose, onSave, mailStatus 
                       </label>
                     </div>
                     <p className="modal-hint">
-                      Subject 由系统按每篇文献自动生成；正文使用 Markdown body_file。Agent Mail 返回确认令牌时，右侧记录会显示“确认发送”。
+                      Subject 使用任务名称和执行时间；正文是任务总结 Markdown，附件包含全文与 AI 报告 ZIP。
                     </p>
                     {mailValidationMessage ? <p className="modal-error">{mailValidationMessage}</p> : null}
                   </div>

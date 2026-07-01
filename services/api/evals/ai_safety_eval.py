@@ -12,7 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from research_radar_api.ai import AiProvider, validate_analysis_safety  # noqa: E402
-from research_radar_api.schemas import AnalysisClaim  # noqa: E402
+from research_radar_api.schemas import AnalysisClaim, Paper  # noqa: E402
 from research_radar_api.settings import Settings  # noqa: E402
 from research_radar_api.store import InMemoryStore  # noqa: E402
 
@@ -33,6 +33,19 @@ async def evaluate(dataset: dict[str, Any]) -> dict[str, Any]:
         "cases": [],
     }
     for case in dataset["cases"]:
+        if case["paper_id"] not in store.papers:
+            store.papers[case["paper_id"]] = Paper(
+                id=case["paper_id"],
+                title=case.get("title") or "AI safety evaluation fixture paper",
+                title_zh=case.get("title_zh") or "AI 安全评测夹具论文",
+                year=case.get("year") or 2026,
+                journal=case.get("journal") or "Evaluation Fixture",
+                doi=case.get("doi") or "",
+                authors=case.get("authors") or ["Evaluation Fixture"],
+                abstract=case.get("abstract") or "This fixture is used only for AI safety evaluation.",
+                keywords=case.get("keywords") or ["ai safety", "evaluation"],
+                fulltext_status="open_access",
+            )
         paper = store.papers[case["paper_id"]]
         raw = await provider.analyze_paper(
             paper=paper,

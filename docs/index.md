@@ -42,6 +42,7 @@
 | [RR-MAIN-001-acceptance-report.md](./RR-MAIN-001-acceptance-report.md) | RR-MAIN-001 实施结果、验收命令、邮件实发前置条件和后续动作 | 产品、前端、后端、测试 |
 | [RR-MAIN-002-codebase-and-doc-gap-audit.md](./RR-MAIN-002-codebase-and-doc-gap-audit.md) | 主产品代码清理、文档对齐、旧 Phase 1 兼容能力和后续功能补齐清单 | 产品、研发、测试、管理 |
 | [RR-MAIN-004-project-handoff.md](./RR-MAIN-004-project-handoff.md) | 当前项目交接文档：从启动、功能、架构、接口、文档地图到未来开发清单 | 新接手开发者、Agent、产品、测试 |
+| [RR-MAIN-005-hardening-and-task-digest-report.md](./RR-MAIN-005-hardening-and-task-digest-report.md) | 去硬编码、PDF 全文分析边界和任务级邮件汇总的实施验收报告 | 产品、研发、测试 |
 
 说明：`RR-DEV-008-gap-audit.md`、`RR-DEV-010-current-product-acceptance-audit.md` 属于 RR-MAIN-001 迁移前的历史审计。当前主产品验收应优先参考 `RR-MAIN-001-*`、`RR-MAIN-002-*` 与 `RR-MAIN-004-project-handoff.md`。
 

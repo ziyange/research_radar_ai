@@ -1,5 +1,7 @@
-from fastapi.testclient import TestClient
+import zipfile
 from types import SimpleNamespace
+
+from fastapi.testclient import TestClient
 
 from research_radar_api import literature
 from research_radar_api.main import app
@@ -36,17 +38,16 @@ def add_fulltext_test_paper(paper_id: str = "paper_test_fulltext") -> dict:
     return paper
 
 
-def test_literature_library_imports_demo_assets() -> None:
+def test_literature_library_starts_without_demo_assets() -> None:
+    literature.repository.library = {"papers": [], "scanRuns": [], "reports": [], "mailDeliveries": []}
+    literature.repository.tasks = []
     response = client.get("/api/v1/literature/library")
 
     assert response.status_code == 200
     payload = response.json()
-    assert len(payload["papers"]) >= 1
-    assert len(payload["scanRuns"]) >= 1
-    assert len(payload["reports"]) >= 1
-    assert payload["papers"][0].get("localMarkdownUrl") or payload["papers"][0].get(
-        "localFullTextUrl"
-    )
+    assert payload["papers"] == []
+    assert payload["scanRuns"] == []
+    assert payload["reports"] == []
 
 
 def test_literature_task_crud_roundtrip() -> None:
@@ -209,6 +210,44 @@ def test_literature_upload_pdf_extracts_fulltext() -> None:
     assert updated["localPdfUrl"]
     assert updated["localFullTextUrl"]
     assert updated["fullTextStatus"] == "ready"
+    assert updated["fullTextExtraction"]["charCount"] >= 800
+    assert updated["fullTextExtraction"]["pdfPath"].endswith(".pdf")
+
+
+def test_literature_upload_scanned_pdf_blocks_analysis() -> None:
+    paper = {
+        "id": "paper_test_scanned_pdf",
+        "title": "Scanned PDF paper",
+        "doi": "10.0000/scanned-pdf",
+        "year": 2026,
+        "journal": "Local Test Journal",
+        "source": "Local",
+        "abstract": "Scanned PDF abstract.",
+        "fullTextStatus": "metadata_only",
+    }
+    literature.repository.library["papers"] = [
+        paper,
+        *[item for item in literature.repository.library["papers"] if item["id"] != paper["id"]],
+    ]
+    literature.repository._persist_item("papers", paper)
+
+    upload = client.post(
+        f"/api/v1/literature/papers/{paper['id']}/upload-pdf",
+        files={"file": ("scan.pdf", b"%PDF-1.4\n%%EOF", "application/pdf")},
+    )
+
+    assert upload.status_code == 200
+    updated = upload.json()["paper"]
+    assert updated["fullTextStatus"] == "extract_failed"
+    assert updated["fullTextError"]
+
+    response = client.post(
+        "/api/v1/literature/analyze",
+        json={"paperIds": [paper["id"]], "query": "acceptance", "limit": 1},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "FULLTEXT_REQUIRED"
 
 
 def test_literature_mail_test_requires_recipient_when_no_default() -> None:
@@ -334,6 +373,108 @@ def test_literature_run_disables_legacy_push_task_without_recipient(monkeypatch)
     assert response.status_code == 200
     assert response.json()["tasks"][0]["notifyAfterRun"] is False
     assert response.json()["mailDeliveries"] == literature.repository.serialize_library()["mailDeliveries"]
+
+
+def test_literature_task_push_creates_single_digest_with_zip_attachments(monkeypatch) -> None:
+    monkeypatch.setattr(
+        literature,
+        "mail_status",
+        lambda: {
+            "enabled": True,
+            "installed": True,
+            "authorized": True,
+            "email": "sender@example.com",
+            "sendCapable": True,
+            "provider": "agent_mail",
+            "cli": "agently-cli",
+            "message": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        literature,
+        "get_settings",
+        lambda: SimpleNamespace(
+            agent_mail_auto_confirm=True,
+            agent_mail_default_recipients=[],
+        ),
+    )
+    monkeypatch.setattr(
+        literature,
+        "run_agent_mail",
+        lambda args, cwd=None, timeout=45: literature.CliResult(0, '{"data": {"message_id": "msg_digest"}}', ""),
+    )
+    paper = add_fulltext_test_paper("paper_test_task_digest")
+    task = {
+        "id": "task_digest_push",
+        "query": "task digest research",
+        "count": 1,
+        "yearFrom": 2021,
+        "minScore": 0,
+        "sources": ["openalex"],
+        "downloadOpenPdf": False,
+        "autoAnalyze": True,
+        "dailyEnabled": False,
+        "dailyTime": "09:00",
+        "dailyTimezone": "Asia/Shanghai",
+        "notifyAfterRun": True,
+        "recipientEmails": ["recipient@example.com"],
+        "ccEmails": [],
+        "bccEmails": [],
+    }
+    literature.repository.tasks = [task, *[item for item in literature.repository.tasks if item["id"] != task["id"]]]
+    literature.repository._persist_item("tasks", task)
+
+    async def fake_perform_scan(payload, task_id=None, trigger="manual"):  # noqa: ANN001, ARG001
+        return {
+            "run": {
+                "id": "scan_task_digest",
+                "taskId": task_id,
+                "query": payload["query"],
+                "count": 1,
+                "yearFrom": 2021,
+                "minScore": 0,
+                "sources": ["openalex"],
+                "sourceStatuses": [{"source": "openalex", "query": payload["query"], "status": "succeeded", "count": 1}],
+                "candidateCount": 1,
+                "uniqueCount": 1,
+                "duplicateCount": 0,
+                "savedPaperIds": [paper["id"]],
+                "savedCount": 1,
+                "targetMet": True,
+                "createdAt": "2026-01-01T00:00:00+00:00",
+            },
+            "papers": [paper],
+            "duplicates": [],
+            "library": literature.repository.serialize_library(),
+        }
+
+    monkeypatch.setattr(literature, "perform_scan", fake_perform_scan)
+
+    response = client.post(f"/api/v1/literature/tasks/{task['id']}:run", json={})
+
+    assert response.status_code == 200
+    deliveries = [
+        item for item in response.json()["mailDeliveries"] if item.get("taskId") == task["id"]
+    ]
+    assert deliveries
+    latest = deliveries[0]
+    assert latest["kind"] == "task_digest"
+    assert latest["recipients"] == ["recipient@example.com"]
+    assert latest["paperIds"] == [paper["id"]]
+    assert latest["reportIds"]
+    assert latest["status"] == "sent"
+    assert len(latest["attachments"]) <= 3
+    assert any(item.endswith(".zip") for item in latest["attachments"])
+    assert all(item["kind"] != "paper_fulltext" for item in deliveries)
+    assert all(item["kind"] != "analysis_report" for item in deliveries)
+    zip_paths = [
+        literature.resolve_reader_file(path)
+        for path in latest["attachments"]
+        if path.endswith(".zip")
+    ]
+    assert zip_paths and all(path and path.exists() for path in zip_paths)
+    with zipfile.ZipFile(zip_paths[0]) as archive:
+        assert archive.namelist()
 
 
 def test_literature_expired_confirmation_regenerates_pending_token(monkeypatch) -> None:

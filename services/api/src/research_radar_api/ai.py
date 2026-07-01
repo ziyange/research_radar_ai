@@ -294,35 +294,24 @@ class AiProvider:
         text: str,
         discipline: str | None,
     ) -> dict[str, Any]:
-        is_bamboo = "竹" in text or "bamboo" in text.lower()
+        short_text = text[:32] or "用户研究方向"
         return {
             "discipline": discipline or "材料科学",
-            "subfield": "生物质材料" if is_bamboo else "待确认方向",
-            "research_object": ["脱木质素竹片"] if is_bamboo else ["用户描述的研究对象"],
+            "subfield": "待确认方向",
+            "research_object": ["用户描述的研究对象"],
             "research_questions": ["改性方法如何影响材料性能", "哪些文献最接近当前技术路线"],
             "goals": ["找到高相关论文", "沉淀可追溯科研证据", "发现可验证研究空白"],
-            "methods": ["高碘酸钠氧化", "二胺改性", "热压"] if is_bamboo else ["文献检索", "方法迁移"],
-            "materials": ["脱木质素竹片", "生物质材料", "纤维素基材料"] if is_bamboo else ["目标材料"],
-            "reagents": ["高碘酸钠", "二胺"] if is_bamboo else [],
+            "methods": ["文献检索", "方法迁移", "证据对比"],
+            "materials": ["目标材料"],
+            "reagents": [],
             "metrics": ["力学性能", "界面结合", "热稳定性"],
-            "mechanisms": ["醛基-胺基反应", "界面交联"] if is_bamboo else [],
-            "applications": ["热压材料", "可持续复合材料"] if is_bamboo else [],
-            "keywords_zh": ["脱木质素竹材", "高碘酸钠氧化", "二胺改性", "热压"]
-            if is_bamboo
-            else [text[:20]],
-            "keywords_en": [
-                "delignified bamboo",
-                "sodium periodate oxidation",
-                "diamine modification",
-                "hot pressing",
-            ]
-            if is_bamboo
-            else [],
-            "synonyms": ["periodate oxidation", "aldehyde cellulose", "biomass composite"]
-            if is_bamboo
-            else [],
-            "exclusions": ["无化学改性的竹材应用", "纯木塑复合材料"] if is_bamboo else [],
-            "confidence": 0.82 if is_bamboo else 0.68,
+            "mechanisms": [],
+            "applications": [],
+            "keywords_zh": [short_text],
+            "keywords_en": [],
+            "synonyms": [],
+            "exclusions": [],
+            "confidence": 0.62,
         }
 
     def _mock_retrieval_plan(self, text: str) -> dict[str, Any]:
@@ -357,9 +346,9 @@ class AiProvider:
         analysis_type: str,
         input_scope: str,
     ) -> dict[str, Any]:
-        relation = "与当前研究方向高度相关"
-        if profile and not set(profile.methods).intersection({"高碘酸钠氧化", "二胺改性", "热压"}):
-            relation = "可作为方法或背景参考"
+        relation = "可作为当前研究方向的候选参考"
+        if profile and set(profile.methods).intersection(set(paper.keywords or [])):
+            relation = "与当前画像中的方法关键词存在直接重合"
 
         claims = [
             AnalysisClaim(
@@ -383,7 +372,7 @@ class AiProvider:
                 ),
             ),
             AnalysisClaim(
-                claim="与用户方向相比，该论文可用于对照材料改性、界面结合或热压工艺证据。",
+                claim="与用户方向相比，该论文可用于对照研究对象、方法路线、评价指标或证据强度。",
                 fact_level="cross_paper_comparison",
                 evidence=ClaimEvidence(
                     paper_id=paper.id,
@@ -403,7 +392,7 @@ class AiProvider:
                 ),
             ),
             AnalysisClaim(
-                claim="可启发用户优先比较氧化程度、二胺种类和热压条件的交互影响。",
+                claim="可启发用户优先比较变量设置、评价指标和结果证据之间的关系。",
                 fact_level="research_inspiration",
                 evidence=ClaimEvidence(
                     paper_id=paper.id,

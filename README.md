@@ -96,7 +96,7 @@ AGENT_AI_ANALYSIS_CONCURRENCY=2
 
 `AI_PROVIDER=openai` 时如果缺少 key、base URL 或 model，接口会返回 `AI_PROVIDER_CONFIG_MISSING`，不会静默回退 mock。
 
-`DEMO_SEED_ENABLED=false` 是真实业务默认值，不会初始化 demo 论文。开发演示或本地 smoke flow 可显式改为 `true`。`DEV_USER_ID=usr_demo` 仅用于开发环境免登录；生产环境应接入正式认证，不依赖该值。
+`DEMO_SEED_ENABLED=false` 是真实业务默认值。当前主产品不会在空库启动时导入历史 demo 文献；正式数据只来自数据库、用户上传、本地对象存储、OpenAlex/Crossref 和 AI/API 返回。`DEV_USER_ID=usr_demo` 仅用于开发环境免登录；生产环境应接入正式认证，不依赖该值。
 
 本地文档/界面验收可以使用 `AI_PROVIDER=mock`；真实 AI 报告验收必须配置 OpenAI-compatible 参数。
 
@@ -115,7 +115,7 @@ GET http://127.0.0.1:8010/api/v1/literature/health
 GET http://127.0.0.1:8010/api/v1/literature/library
 ```
 
-首次启动 FastAPI 时，会从正式本地存储目录 `storage/literature/imported-local-data/` 导入历史文献、报告、采集记录和任务，再写入 PostgreSQL `rr_entities` 或内存开发存储。
+首次启动 FastAPI 时，如果数据库为空，文献库和任务列表保持为空，不再自动导入历史 demo 数据。
 
 当前邮件推送以 Agent Mail 为主。“绑定邮箱”是发送账号，不是收件人。推送邮件必须配置收件人，并开启自动确认：
 
@@ -130,9 +130,9 @@ AGENT_MAIL_DEFAULT_RECIPIENTS=reader@example.com
 采集任务表单开启“推送邮箱”后，需要填写收件人 To；CC/BCC 可选。邮件参数映射为：
 
 - `to`：任务级收件人或 `AGENT_MAIL_DEFAULT_RECIPIENTS`
-- `subject`：系统按每篇论文自动生成 `[研知雷达] 完整文献 · {标题}` 或 `[研知雷达] AI分析 · {标题}`
-- `body_file`：生成的 Markdown 文件，完整文献包含文献信息、摘要、链接和本地原文/解析；AI 任务包含单篇 AI 报告
-- `attachment`：最多 3 个，第一版优先附带本地 PDF
+- `subject`：系统按任务生成 `[研知雷达] {任务名称或研究方向} · {执行时间}`
+- `body_file`：任务执行总结 Markdown，包含执行参数、来源状态、保存/去重结果、文献列表和 AI 分析状态
+- `attachment`：最多 3 个；系统会把全文 PDF/Markdown 和 AI 报告打成 ZIP 附件包
 
 `EMAIL_PROVIDER=smtp` 时，任务完成后会直接自动发送，不需要人工确认。`EMAIL_PROVIDER=agent_mail` 且 `AGENT_MAIL_AUTO_CONFIRM=true` 时，任务完成后会自动发起投递，若 CLI 返回 `ctk_xxx`，后端会立即带 `confirmation-token` 完成第二次发送。`AGENT_MAIL_AUTO_CONFIRM=false` 时，仍保留前端人工确认流程。
 
@@ -272,7 +272,7 @@ $env:RUN_LIVE_RETRIEVAL_TESTS="1"
 - 本地文献库：知识图谱、右侧列表、搜索、排序、节点定位、文献详情。
 - 文献原文：优先 PDF；没有全文时提示打开 DOI 下载并上传，或尝试自动获取公开 PDF/HTML。
 - AI 分析：必须先有可读全文；只有元数据/摘要时禁止生成报告。
-- 邮件推送：任务完成后逐篇推送完整文献卡片或 AI 分析报告。
+- 邮件推送：任务完成后统一推送一封任务总结邮件，附件包含全文与 AI 报告 ZIP。
 - 浮层任务中心：采集、全文获取、上传、AI 分析、邮件状态和错误提示统一进入右下角浮层。
 
 ## 主要目录
@@ -300,7 +300,7 @@ storage/literature/                        本地对象存储与导入数据
 ## 当前边界与未完成
 
 - 自动执行字段已经存在，但正式无人值守调度仍需接 Redis + RQ/Celery。
-- 当前持久化仍以 `rr_entities` JSONB 为主，正式关系模型和迁移脚本仍待补。
+- 当前持久化仍以 `rr_entities` JSONB 为主，正式关系模型和迁移脚本仍待补；空库不再自动填充 demo 文献。
 - Semantic Scholar、arXiv、中文数据库、Zotero、浏览器扩展、移动端、团队/机构版仍属于后续阶段。
 - X-MOL/CNKI 未配置官方授权 API 时不做自动抓取，不保存学校账号、图书馆密码、统一认证密码或长期 Cookie。
 - 没有全文时不生成“摘要级伪分析报告”。

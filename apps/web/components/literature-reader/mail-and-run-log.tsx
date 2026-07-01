@@ -183,7 +183,7 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
           <strong>邮箱推送</strong>
           {log.mailDeliveries.slice(0, 8).map((delivery) => (
             <p key={delivery.id}>
-              {delivery.kind === "analysis_report" ? "AI 分析" : "完整文献"} · {mailStatusText(delivery.status)}
+              {deliveryKindLabel(delivery.kind)} · {mailStatusText(delivery.status)}
             </p>
           ))}
         </div>
@@ -219,6 +219,14 @@ function mailErrorText(error) {
   } catch {
     return text;
   }
+}
+
+function deliveryKindLabel(kind) {
+  if (kind === "task_digest") return "任务汇总";
+  if (kind === "analysis_report") return "AI 分析";
+  if (kind === "paper_fulltext") return "完整文献";
+  if (kind === "mail_test") return "测试";
+  return kind || "邮件";
 }
 
 function compactList(value) {
@@ -284,8 +292,9 @@ function MailDeliveryList({ deliveries, onConfirmMailDelivery, onRetryMailDelive
           <div>
             <strong>{delivery.subject}</strong>
             <span>
-              {delivery.kind === "analysis_report" ? "AI 分析" : delivery.kind === "paper_fulltext" ? "完整文献" : "测试"} · {mailStatusText(delivery.status)}
+              {deliveryKindLabel(delivery.kind)} · {mailStatusText(delivery.status)}
             </span>
+            {delivery.runId ? <span>任务运行：{delivery.runId}</span> : null}
             {delivery.recipients?.length ? <span>To：{delivery.recipients.join(", ")}</span> : null}
             {delivery.cc?.length ? <span>CC：{delivery.cc.join(", ")}</span> : null}
             {delivery.attachments?.length ? <span>附件：{delivery.attachments.length} 个</span> : null}
@@ -351,7 +360,7 @@ export function RunLogList({
       <div className={`mail-status-card ${mailStatus?.authorized ? "bound" : ""}`}>
         <div>
           <strong>{mailStatus?.authorized ? "邮箱已绑定" : "邮箱未绑定"}</strong>
-          <span>{mailStatus?.authorized ? mailStatus.email : "绑定后才能在采集任务中开启逐条推送。"}</span>
+          <span>{mailStatus?.authorized ? mailStatus.email : "绑定后才能在采集任务中开启任务汇总推送。"}</span>
         </div>
         {!mailStatus?.authorized ? (
           <button type="button" onClick={onBindMail} disabled={loading === "mail-auth"}>

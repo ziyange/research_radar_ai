@@ -16,7 +16,7 @@
 -> 本地文献库用知识图谱和列表组织文献
 -> 用户获取/上传 PDF 或公开 HTML 正文
 -> AI 基于全文生成 Markdown 研读报告
--> 任务完成后可逐篇推送完整文献或 AI 报告到邮箱
+-> 任务完成后统一推送一封任务总结邮件，附件包含全文与 AI 报告包
 ```
 
 当前产品入口只看：
@@ -40,7 +40,7 @@
 | 本地文献库 | 中间知识图谱、右侧文献列表、搜索排序 | 任务/主题分组、节点定位、列表高亮、文献详情跳转 | 语义关系、实体关系和项目归类仍弱 |
 | 文献详情 | 原文/PDF/Markdown、上传 PDF、获取 DOI 原文、删除文档 | PDF 优先展示；无全文时给出来源链接、上传入口和自动获取入口 | 出版商 HTML/PDF 适配还需扩展；OCR 未做 |
 | AI 分析报告 | Markdown 报告、Mermaid 流程图、证据范围 | 只允许基于本地全文生成报告；摘要/元数据不生成伪报告 | Prompt 质量、证据切片、评测集仍需加强 |
-| 邮箱推送 | 绑定发送邮箱、任务级填写收件人、邮件记录 | 支持完整文献卡片或 AI 报告逐篇推送；Agent Mail 自动确认路径已接入 | sent 状态回查和失败重试体验仍需加强 |
+| 邮箱推送 | 绑定发送邮箱、任务级填写收件人、邮件记录 | 支持任务级汇总邮件，附件打包全文 PDF/Markdown 与 AI 报告；Agent Mail 自动确认路径已接入 | sent 状态回查和失败重试体验仍需加强 |
 | 浮层任务中心 | 页面右下角按钮打开任务/消息浮层 | 展示正在执行的采集、全文获取、上传、AI、邮件状态和错误 | 长期通知历史不保留，后续可做通知中心 |
 
 ## 3. 总体架构
@@ -64,7 +64,7 @@ flowchart LR
 
 - 前端请求统一指向 `NEXT_PUBLIC_API_BASE_URL`。
 - 后端 `literature.py` 暂时仍是主路由大文件，但运行逻辑已经部分拆到 `literature_runtime/`。
-- 数据库第一版使用 `rr_entities` JSONB 通用实体表。
+- 数据库第一版使用 `rr_entities` JSONB 通用实体表；空库启动为空，不再自动导入 demo 文献。
 - 文献 PDF、Markdown、报告、邮件正文等资产使用本地对象存储路径。
 - PostgreSQL、S3、Redis、RQ/Celery 是正式化目标，但尚未完全落地。
 
@@ -146,7 +146,7 @@ npm run build
 | `PaperAsset` | PDF、Markdown、全文、AI 报告、邮件正文等本地资产 | 部分实现，仍偏路径字段 |
 | `PaperAnalysisReport` | 单篇 AI Markdown 研读报告 | 已实现 |
 | `MailBinding` | Agent Mail 发送账号绑定状态 | 已实现 |
-| `MailDelivery` | 邮件投递记录，包含 to、subject、body_file、attachment、status | 已实现 |
+| `MailDelivery` | 邮件投递记录，包含 to、subject、body_file、attachment、status；任务执行使用 `task_digest` 汇总邮件 | 已实现 |
 | `TaskExecutionLog` | 采集、全文、AI、邮件等执行日志 | 部分实现，仍需更清晰事件模型 |
 | `ResearchProject` | 原 PRD 的研究项目/课题容器 | 旧能力存在，尚未正式融合进文献阅读器 |
 
@@ -238,26 +238,26 @@ flowchart TD
 
 | 任务类型 | 推送内容 | Subject | Body |
 | --- | --- | --- | --- |
-| 未开启 AI 分析 | 完整文献卡片 | `[研知雷达] 完整文献 · {标题}` | 论文标题、DOI、年份、期刊、摘要、评分、来源链接、PDF/Markdown 状态 |
-| 开启 AI 分析 | AI 分析报告 | `[研知雷达] AI分析 · {标题}` | 单篇 Markdown 报告、证据范围、可追溯说明 |
+| 未开启 AI 分析 | 任务汇总 + 全文附件包 | `[研知雷达] {任务名称或研究方向} · {执行时间}` | 任务参数、来源状态、保存/去重结果、文献列表、全文 ZIP |
+| 开启 AI 分析 | 任务汇总 + 全文/报告附件包 | `[研知雷达] {任务名称或研究方向} · {执行时间}` | 任务参数、来源状态、文献列表、AI 分析状态、全文 ZIP、AI 报告 ZIP |
 
 必填参数：
 
 - `to`：收件人邮箱，来自任务表单或 `AGENT_MAIL_DEFAULT_RECIPIENTS`。
-- `subject`：系统按论文生成。
-- `body` 或 `body_file`：优先使用生成的 Markdown 文件。
+- `subject`：系统按任务名称/研究方向和执行时间生成。
+- `body` 或 `body_file`：优先使用任务执行总结 Markdown 文件。
 
 可选参数：
 
 - `cc`
 - `bcc`
-- `attachment`，最多 3 个，优先本地 PDF。
+- `attachment`，最多 3 个；全文和 AI 报告通过 ZIP 打包。
 
 交互约束：
 
 - 绑定邮箱只代表发送账号已授权，不代表收件人已填写。
 - 未填写合法收件人时，“开启推送邮箱”应禁用或显示明确校验错误。
-- 任务执行完后，如果自动发送失败，记录为 `failed` 或 `queued`，不能静默吞掉。
+- 任务执行完后只生成一条 `task_digest` 邮件记录；如果自动发送失败，记录为 `failed` 或 `queued`，不能静默吞掉。
 
 ## 11. 文档地图
 

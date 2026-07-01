@@ -42,7 +42,7 @@ def test_cold_start_to_diagnosis_flow():
             },
         )
     )
-    assert "高碘酸钠氧化" in profile["methods"]
+    assert "文献检索" in profile["methods"]
 
     confirmed = unwrap(client.post(f"/api/v1/projects/{project['id']}/profile:confirm"))
     assert confirmed["status"] == "confirmed"

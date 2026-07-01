@@ -142,22 +142,7 @@ def relevant_enough(paper: dict[str, Any], query: str) -> bool:
 
 
 def fallback_queries(query: str) -> list[dict[str, str]]:
-    translated = query
-    glossary = [
-        (r"纳米材料|纳米颗粒|纳米粒子", "nanomaterials nanoparticles"),
-        (r"植物|植株|作物", "plants crops"),
-        (r"食品安全|食品污染", "food safety food contaminants"),
-        (r"传感器|检测", "sensor detection"),
-        (r"重金属", "heavy metals"),
-        (r"土壤", "soil"),
-        (r"抗旱|干旱", "drought stress"),
-        (r"吸收|转运", "uptake translocation"),
-        (r"毒性|生态毒性", "toxicity ecotoxicity"),
-        (r"微生物|根系微生物", "rhizosphere microbiome"),
-    ]
-    for pattern, replacement in glossary:
-        translated = re.sub(pattern, f" {replacement} ", translated)
-    translated = re.sub(r"[，、；;]+", " ", translated)
+    translated = re.sub(r"[，、；;]+", " ", query)
     translated = re.sub(r"\s+", " ", translated).strip()
     queries = unique_strings(
         [
