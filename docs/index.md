@@ -40,6 +40,9 @@
 | [RR-DEV-011-standalone-agent-research-scan.md](./RR-DEV-011-standalone-agent-research-scan.md) | 独立 Agent Research Scan 接口、AI 查询扩展、OpenAlex/Crossref 正式接入、HITL、筛选、去重和 AI 分析验收 | 产品、AI、后端、测试 |
 | [RR-MAIN-001-literature-reader-migration.md](./RR-MAIN-001-literature-reader-migration.md) | 文献阅读器 demo 全量迁移主产品的接口、数据、邮件与验收基线 | 产品、前端、后端、测试 |
 | [RR-MAIN-001-acceptance-report.md](./RR-MAIN-001-acceptance-report.md) | RR-MAIN-001 实施结果、验收命令、邮件实发前置条件和后续动作 | 产品、前端、后端、测试 |
+| [RR-MAIN-002-codebase-and-doc-gap-audit.md](./RR-MAIN-002-codebase-and-doc-gap-audit.md) | 主产品代码清理、文档对齐、旧 Phase 1 兼容能力和后续功能补齐清单 | 产品、研发、测试、管理 |
+
+说明：`RR-DEV-008-gap-audit.md`、`RR-DEV-010-current-product-acceptance-audit.md` 属于 RR-MAIN-001 迁移前的历史审计。当前主产品验收应优先参考 `RR-MAIN-001-*` 与 `RR-MAIN-002-*` 文档。
 
 ## 3. 需求编号规则
 
