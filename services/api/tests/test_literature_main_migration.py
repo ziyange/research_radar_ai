@@ -332,6 +332,36 @@ def test_literature_agent_mail_auto_confirms_token(monkeypatch) -> None:
     assert "--confirmation-token" in calls[1]
 
 
+def test_literature_agent_mail_authorized_is_send_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(literature.shutil, "which", lambda cli: cli)
+    monkeypatch.setattr(
+        literature,
+        "get_settings",
+        lambda: SimpleNamespace(
+            email_provider="mock",
+            agent_mail_enabled=False,
+            agent_mail_cli="agently-cli",
+            agent_mail_auto_confirm=True,
+        ),
+    )
+    monkeypatch.setattr(
+        literature,
+        "run_agent_mail",
+        lambda args, cwd=None, timeout=45: literature.CliResult(
+            0,
+            '{"data": {"aliases": [{"email": "sender@example.com", "is_primary": true}]}}',
+            "",
+        ),
+    )
+
+    status = literature.mail_status()
+
+    assert status["enabled"] is True
+    assert status["authorized"] is True
+    assert status["sendCapable"] is True
+    assert status["autoConfirm"] is True
+
+
 def test_literature_smtp_delivery_sends_without_confirmation(monkeypatch) -> None:
     sent: list[object] = []
 

@@ -303,12 +303,14 @@ def mail_status() -> dict[str, Any]:
     aliases = payload.get("data", {}).get("aliases") or []
     primary = next((item for item in aliases if item.get("is_primary")), aliases[0] if aliases else {})
     email = primary.get("email") or ""
+    authorized = bool(result.code == 0 and email)
+    effective_enabled = bool(enabled or authorized)
     return {
-        "enabled": enabled,
+        "enabled": effective_enabled,
         "installed": True,
-        "authorized": bool(result.code == 0 and email),
+        "authorized": authorized,
         "email": email,
-        "sendCapable": bool(result.code == 0 and email),
+        "sendCapable": authorized,
         "provider": "agent_mail",
         "autoConfirm": bool(getattr(settings, "agent_mail_auto_confirm", False)),
         "cli": cli,
@@ -476,7 +478,12 @@ def paper_delivery_markdown(paper: dict[str, Any], task: dict[str, Any] | None, 
     return "\n".join(lines)
 
 
-def attempt_mail_delivery(delivery_id: str, confirmation_token: str = "") -> dict[str, Any]:
+def attempt_mail_delivery(
+    delivery_id: str,
+    confirmation_token: str = "",
+    auto_confirm_attempted: bool = False,
+    regenerate_attempted: bool = False,
+) -> dict[str, Any]:
     index = next((idx for idx, item in enumerate(repository.library["mailDeliveries"]) if item["id"] == delivery_id), -1)
     if index < 0:
         raise HTTPException(status_code=404, detail={"code": "MAIL_DELIVERY_NOT_FOUND"})
@@ -559,10 +566,14 @@ def attempt_mail_delivery(delivery_id: str, confirmation_token: str = "") -> dic
             confirmationSummary=summary,
             error="",
         )
-        if getattr(get_settings(), "agent_mail_auto_confirm", False) and not confirmation_token:
+        if (
+            getattr(get_settings(), "agent_mail_auto_confirm", False)
+            and not confirmation_token
+            and not auto_confirm_attempted
+        ):
             repository.library["mailDeliveries"][index] = delivery
             repository._persist_item("mailDeliveries", delivery)
-            return attempt_mail_delivery(delivery_id, token)
+            return attempt_mail_delivery(delivery_id, token, auto_confirm_attempted=True)
     else:
         if confirmation_token and confirmation_token_invalid(output):
             delivery.update(
@@ -573,7 +584,16 @@ def attempt_mail_delivery(delivery_id: str, confirmation_token: str = "") -> dic
             )
             repository.library["mailDeliveries"][index] = delivery
             repository._persist_item("mailDeliveries", delivery)
-            return attempt_mail_delivery(delivery_id)
+            if not regenerate_attempted:
+                return attempt_mail_delivery(
+                    delivery_id,
+                    auto_confirm_attempted=True,
+                    regenerate_attempted=True,
+                )
+            delivery.update(status="failed", error="MAIL_CONFIRMATION_TOKEN_INVALID")
+            repository.library["mailDeliveries"][index] = delivery
+            repository._persist_item("mailDeliveries", delivery)
+            return delivery
         delivery.update(status="failed", error=output or f"AGENT_MAIL_EXIT_{result.code}")
     repository.library["mailDeliveries"][index] = delivery
     repository._persist_item("mailDeliveries", delivery)

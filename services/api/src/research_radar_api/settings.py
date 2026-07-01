@@ -15,7 +15,12 @@ class Settings(BaseSettings):
     demo_seed_enabled: bool = False
     dev_user_id: str | None = None
     cors_origins: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3001",
+        ]
     )
 
     database_url: str = "sqlite+memory://dev"
@@ -51,7 +56,7 @@ class Settings(BaseSettings):
     email_mock_force_failure: bool = False
     agent_mail_enabled: bool = False
     agent_mail_cli: str = "agently-cli"
-    agent_mail_auto_confirm: bool = False
+    agent_mail_auto_confirm: bool = True
     agent_mail_default_recipients: Annotated[list[str], NoDecode] = Field(default_factory=list)
     literature_scheduler_enabled: bool = False
     literature_storage_provider: Literal["local", "s3"] = "local"

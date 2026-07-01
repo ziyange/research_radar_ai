@@ -1,6 +1,14 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
-export const API_BASE = "/api/v1/literature";
+const configuredApiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8010/api/v1";
+
+export const API_BASE = normalizeLiteratureApiBase(configuredApiBase);
+
+function normalizeLiteratureApiBase(value) {
+  const base = String(value || "").replace(/\/+$/, "");
+  if (!base) return "http://127.0.0.1:8010/api/v1/literature";
+  return base.endsWith("/literature") ? base : `${base}/literature`;
+}
 
 export const defaultScan = {
   query: "",
@@ -41,7 +49,7 @@ async function parseApiResponse(response, fallbackMessage) {
     throw new Error(
       looksLikeHtml
         ? "请求打到了页面而不是本地 API。请确认 FastAPI 已启动在 127.0.0.1:8010，并从主前端 http://127.0.0.1:3000 访问。"
-      : fallbackMessage,
+        : fallbackMessage,
     );
   }
   if (!response.ok) {
