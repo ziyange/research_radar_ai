@@ -1,9 +1,13 @@
 import zipfile
 from types import SimpleNamespace
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from research_radar_api import literature
+from research_radar_api.literature_runtime import repository as repository_module
+from research_radar_api.literature_runtime.markdown_pdf import markdown_to_pdf
+from research_radar_api.literature_runtime.repository import LiteratureRepository
 from research_radar_api.main import app
 
 
@@ -87,6 +91,28 @@ def test_literature_task_crud_roundtrip() -> None:
     deleted = client.delete(f"/api/v1/literature/tasks/{task['id']}")
     assert deleted.status_code == 200
     assert all(item["id"] != task["id"] for item in deleted.json()["tasks"])
+
+
+def test_literature_tasks_persist_to_local_storage_when_database_is_memory(monkeypatch) -> None:
+    storage_root = literature.ROOT_DIR / "tmp" / f"literature-repo-test-{uuid4().hex}"
+    monkeypatch.setattr(
+        repository_module,
+        "get_settings",
+        lambda: SimpleNamespace(database_url="sqlite+memory://dev", literature_storage_root=str(storage_root)),
+    )
+    repo = LiteratureRepository()
+    task = {
+        "id": "task_local_persist",
+        "query": "persistent task",
+        "count": 5,
+        "createdAt": "2026-01-01T00:00:00+00:00",
+    }
+
+    repo.tasks = [task]
+    repo._persist_item("tasks", task)
+    reloaded = LiteratureRepository()
+
+    assert any(item["id"] == task["id"] and item["query"] == task["query"] for item in reloaded.tasks)
 
 
 def test_literature_scan_degrades_when_openalex_fails(monkeypatch) -> None:
@@ -205,6 +231,10 @@ def test_literature_cjk_query_can_save_crossref_provider_ranked_results(monkeypa
     assert run["savedCount"] == 1
     assert run["candidateCount"] == 1
     assert run["degraded"] is True
+    messages = [item["message"] for item in run["executionEvents"]]
+    assert any("连接 crossref" in message for message in messages)
+    assert any("评分筛选" in message for message in messages)
+    assert any("已入库" in message for message in messages)
 
 
 def test_literature_mock_analysis_generates_markdown_report() -> None:
@@ -337,8 +367,10 @@ def test_literature_mail_delivery_records_send_parameters() -> None:
     delivery = response.json()["delivery"]
     assert delivery["recipients"] == ["recipient@example.com"]
     assert delivery["subject"].startswith("[研知雷达]")
-    assert delivery["bodyFile"].endswith(".md")
-    assert delivery["markdownPath"] == delivery["bodyFile"]
+    assert delivery["markdownPath"].endswith(".md")
+    assert delivery["bodyFile"].endswith(".txt")
+    assert delivery["bodyTextPath"] == delivery["bodyFile"]
+    assert delivery["bodyPdfPath"].endswith(".pdf")
     assert isinstance(delivery.get("attachments"), list)
 
 
@@ -505,6 +537,10 @@ def test_literature_task_push_skips_digest_when_no_new_papers(monkeypatch) -> No
     payload = response.json()
     assert payload["run"]["savedCount"] == 0
     assert payload["taskDigestDelivery"] is None
+    assert any(
+        item["stage"] == "mail" and item["status"] == "skipped"
+        for item in payload["run"]["executionEvents"]
+    )
     after = [
         item["id"]
         for item in payload["mailDeliveries"]
@@ -601,8 +637,15 @@ def test_literature_task_push_creates_single_digest_with_zip_attachments(monkeyp
     assert latest["paperIds"] == [paper["id"]]
     assert latest["reportIds"]
     assert latest["status"] == "sent"
+    assert latest["bodyFile"].endswith(".txt")
+    assert latest["bodyTextPath"].endswith(".txt")
+    assert latest["bodyPdfPath"].endswith(".pdf")
+    body_text_path = literature.resolve_reader_file(latest["bodyTextPath"])
+    assert body_text_path and body_text_path.exists()
+    assert "| --- |" not in body_text_path.read_text(encoding="utf-8")
     assert len(latest["attachments"]) <= 3
     assert any(item.endswith(".zip") for item in latest["attachments"])
+    assert any(item.endswith(".pdf") for item in latest["attachments"])
     assert all(item["kind"] != "paper_fulltext" for item in deliveries)
     assert all(item["kind"] != "analysis_report" for item in deliveries)
     zip_paths = [
@@ -611,8 +654,25 @@ def test_literature_task_push_creates_single_digest_with_zip_attachments(monkeyp
         if path.endswith(".zip")
     ]
     assert zip_paths and all(path and path.exists() for path in zip_paths)
-    with zipfile.ZipFile(zip_paths[0]) as archive:
-        assert archive.namelist()
+    for zip_path in zip_paths:
+        with zipfile.ZipFile(zip_path) as archive:
+            names = archive.namelist()
+            assert names
+            assert all(not name.endswith(".md") for name in names)
+            assert any(name.endswith(".pdf") for name in names)
+
+
+def test_markdown_to_pdf_generates_mobile_readable_attachment() -> None:
+    pdf_path = literature.repository.mail_dir / f"markdown-pdf-test-{uuid4().hex}.pdf"
+    markdown_to_pdf(
+        "# 标题\n\n这是 **加粗** 内容。\n\n| 字段 | 内容 |\n| --- | --- |\n| DOI | 10.0000/test |\n",
+        pdf_path,
+        title="Markdown PDF 验收",
+    )
+
+    assert pdf_path.exists()
+    assert pdf_path.read_bytes().startswith(b"%PDF")
+    assert pdf_path.stat().st_size > 1000
 
 
 def test_literature_expired_confirmation_regenerates_pending_token(monkeypatch) -> None:

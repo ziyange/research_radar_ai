@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -44,7 +45,8 @@ class LiteratureRepository:
         self.downloads_dir = self.storage_root / "downloads"
         self.reports_dir = self.storage_root / "reports"
         self.mail_dir = self.storage_root / "mail-outbox"
-        for path in [self.papers_dir, self.downloads_dir, self.reports_dir, self.mail_dir]:
+        self.entities_dir = self.storage_root / "entities"
+        for path in [self.papers_dir, self.downloads_dir, self.reports_dir, self.mail_dir, self.entities_dir]:
             path.mkdir(parents=True, exist_ok=True)
         self.library: dict[str, list[dict[str, Any]]] = {
             "papers": [],
@@ -57,9 +59,16 @@ class LiteratureRepository:
 
     def _load(self) -> None:
         rows = self.persistence.load_all()
+        if not rows and not self.persistence.enabled:
+            rows = self._load_file_entities()
         loaded = False
         for key, entity_type in self.entity_types.items():
             payloads = rows.get(entity_type) or []
+            payloads = sorted(
+                payloads,
+                key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""),
+                reverse=True,
+            )
             if key == "tasks":
                 self.tasks = payloads
             else:
@@ -74,9 +83,41 @@ class LiteratureRepository:
         item_id = str(item.get("id") or item.get("taskId") or uuid4())
         item["id"] = item_id
         self.persistence.save(entity_type, item_id, item)
+        if not self.persistence.enabled:
+            self._persist_file_entity(entity_type, item_id, item)
 
     def _delete_item(self, key: str, item_id: str) -> None:
         self.persistence.delete(self.entity_types[key], item_id)
+        if not self.persistence.enabled:
+            path = self.entities_dir / self.entity_types[key] / f"{item_id}.json"
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # Windows may keep a recently written JSON file locked briefly.
+                # The in-memory list has already been updated; a stale file is
+                # harmless and can be overwritten or ignored by later updates.
+                return
+
+    def _load_file_entities(self) -> dict[str, list[dict[str, Any]]]:
+        rows: dict[str, list[dict[str, Any]]] = {}
+        for entity_type in self.entity_types.values():
+            directory = self.entities_dir / entity_type
+            if not directory.exists():
+                continue
+            for path in directory.glob("*.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, dict):
+                    rows.setdefault(entity_type, []).append(payload)
+        return rows
+
+    def _persist_file_entity(self, entity_type: str, item_id: str, item: dict[str, Any]) -> None:
+        directory = self.entities_dir / entity_type
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{item_id}.json"
+        path.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def save_library(self) -> None:
         for key in ["papers", "scanRuns", "reports", "mailDeliveries"]:

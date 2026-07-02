@@ -49,6 +49,15 @@ function taskMailPushReady(task) {
   return Boolean(task?.notifyAfterRun && recipients.length && !invalidEmails([...recipients, ...cc, ...bcc]).length);
 }
 
+function executionEventsToSteps(events, fallbackSteps = []) {
+  if (!events?.length) return fallbackSteps;
+  return events.map((event, index) => ({
+    key: event.id || `${event.stage || "event"}-${index}`,
+    status: event.status || "done",
+    text: event.message || `${event.stage || "步骤"} 已完成`,
+  }));
+}
+
 export function App() {
   const [library, setLibrary] = useState({ papers: [], scanRuns: [], reports: [] });
   const [health, setHealth] = useState(null);
@@ -317,11 +326,15 @@ export function App() {
       steps: [
         { key: "prepare", status: "done", text: "读取任务参数：研究方向、篇数、年份、评分阈值、数据源和去重策略。" },
         { key: "plan", status: "running", text: "扩展检索式：把中文研究方向转换为可用于 OpenAlex/Crossref 的英文查询组合。" },
-        { key: "search", status: "pending", text: `等待公开数据源返回：${sources}。` },
-        { key: "score", status: "pending", text: "等待评分、筛选、跨源 DOI/标题去重。" },
-        { key: "save", status: "pending", text: "等待入库，并按配置尝试获取开放 PDF 或 HTML 全文。" },
+        { key: "search", status: "pending", text: `准备连接公开数据源：${sources}，逐个关键词拉取候选文献。` },
+        { key: "score", status: "pending", text: "等待按来源相关性、年份、评分、开放获取状态筛选候选。" },
+        { key: "dedupe", status: "pending", text: "等待与本地文献库按 DOI/标题去重，避免重复入库。" },
+        { key: "save", status: "pending", text: "等待保存新文献，并按配置尝试获取开放 PDF 或 HTML 全文。" },
         ...(task.autoAnalyze
-          ? [{ key: "analysis", status: "pending", text: "等待采集完成后，将新入库文献提交 AI 分析队列。" }]
+          ? [{ key: "analysis", status: "pending", text: "等待采集完成后，逐篇检查全文并提交 AI 分析。" }]
+          : []),
+        ...(task.notifyAfterRun
+          ? [{ key: "mail", status: "pending", text: "等待任务完成后生成任务汇总邮件。" }]
           : []),
       ],
     };
@@ -353,7 +366,7 @@ export function App() {
         sourceStatuses: data.run.sourceStatuses || [],
         targetMet: data.run.targetMet,
         exhaustedReason: data.run.exhaustedReason,
-        steps: [
+        steps: executionEventsToSteps(data.run.executionEvents, [
           { key: "prepare", status: "done", text: "已读取任务参数并生成检索计划。" },
           { key: "search", status: "done", text: `公开数据源检索完成，候选 ${data.run.candidateCount || 0} 篇。` },
           { key: "save", status: "done", text: `完成：保存 ${data.run.savedCount || 0} 篇，去重 ${data.run.duplicateCount || 0} 篇。` },
@@ -371,7 +384,7 @@ export function App() {
                   : { key: "mail", status: "skipped", text: "没有新文献，未生成任务邮件。" },
               ]
             : []),
-        ],
+        ]),
       });
       setExpandedRunIds((current) => ({ ...current, [data.run.id]: true }));
       setStatus({

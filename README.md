@@ -131,8 +131,8 @@ AGENT_MAIL_DEFAULT_RECIPIENTS=reader@example.com
 
 - `to`：任务级收件人或 `AGENT_MAIL_DEFAULT_RECIPIENTS`
 - `subject`：系统按任务生成 `[研知雷达] {任务名称或研究方向} · {执行时间}`
-- `body_file`：任务执行总结 Markdown，包含执行参数、来源状态、保存/去重结果、文献列表和 AI 分析状态
-- `attachment`：最多 3 个；系统会把全文 PDF/Markdown 和 AI 报告打成 ZIP 附件包
+- `body_file`：任务执行总结纯文本，包含执行参数、来源状态、保存/去重结果、文献列表和 AI 分析状态，避免手机邮箱直接显示 Markdown 符号
+- `attachment`：最多 3 个；系统会把全文 Markdown、AI 报告 Markdown 先转换为 PDF，再打入 ZIP 附件包，同时附带任务摘要 PDF
 
 `EMAIL_PROVIDER=smtp` 时，任务完成后会直接自动发送，不需要人工确认。`EMAIL_PROVIDER=agent_mail` 且 `AGENT_MAIL_AUTO_CONFIRM=true` 时，任务完成后会自动发起投递，若 CLI 返回 `ctk_xxx`，后端会立即带 `confirmation-token` 完成第二次发送。`AGENT_MAIL_AUTO_CONFIRM=false` 时，仍保留前端人工确认流程。
 

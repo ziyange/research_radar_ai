@@ -136,7 +136,7 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
       <div className="active-step-list">
         {(log.steps || []).map((step, index) => (
           <div className={`active-step ${step.status}`} key={step.key || index}>
-            <span>{step.status === "done" ? "✓" : step.status === "running" ? "…" : step.status === "failed" ? "!" : index + 1}</span>
+            <span>{step.status === "done" ? "✓" : step.status === "running" ? "…" : step.status === "failed" ? "!" : step.status === "skipped" ? "−" : step.status === "warning" ? "!" : index + 1}</span>
             <p>{step.text}</p>
           </div>
         ))}
@@ -423,6 +423,19 @@ export function RunLogList({
                             {index + 1}. [{item.source}] {item.query}
                           </p>
                         ))}
+                      </div>
+                    ) : null}
+                    {run.executionEvents?.length ? (
+                      <div className="run-detail-section">
+                        <p className="run-detail-label">执行过程（{run.executionEvents.length}）</p>
+                        <div className="run-event-list">
+                          {run.executionEvents.slice(0, 80).map((event, index) => (
+                            <p className={`run-detail-line ${event.status === "failed" ? "error" : event.status === "warning" ? "warn" : ""}`} key={event.id || index}>
+                              <span>{event.status === "done" ? "✓" : event.status === "running" ? "…" : event.status === "failed" ? "!" : event.status === "skipped" ? "−" : index + 1}</span>
+                              {event.message || event.stage}
+                            </p>
+                          ))}
+                        </div>
                       </div>
                     ) : null}
                     {run.sourceStatuses?.length ? (

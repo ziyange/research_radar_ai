@@ -20,8 +20,9 @@
   - 扫描版、图片型、加密或文本不足 PDF 会标记 `fullTextStatus=extract_failed`，并阻止 AI 报告生成。
 - 任务开启邮箱推送后，执行完成只生成一条 `task_digest` 邮件记录：
   - 邮件主题：`[研知雷达] {任务名称或研究方向} · {执行时间}`
-  - 正文：任务参数、来源状态、保存/去重结果、文献列表、AI 分析状态和任务总结占位。
-  - 附件：`fulltexts-*.zip`、`analysis-reports-*.zip`、`manifest-*.md`，总数不超过 3。
+  - 正文：纯文本任务摘要，包含任务参数、来源状态、保存/去重结果、文献列表、AI 分析状态和附件说明；不直接发送 Markdown，避免手机邮箱显示格式符号。
+  - 附件：`fulltexts-*.zip`、`analysis-reports-*.zip`、`task-summary-*.pdf`，总数不超过 3。
+  - Markdown 仍作为系统内部存档保留；发送前会转换为 PDF，表格、标题和加粗以 PDF 形式呈现。
 
 ## 3. 仍需后续优化
 
@@ -37,4 +38,5 @@
 - 文本型 PDF 上传后可生成 `localFullTextPath` 并可执行 AI 分析。
 - 扫描/空文本 PDF 上传后不能执行 AI 分析，返回 `FULLTEXT_REQUIRED`。
 - 执行开启邮箱推送的采集任务时只生成一条 `task_digest` 邮件，不再生成每篇 `paper_fulltext` 或 `analysis_report` 邮件。
-- 任务邮件附件不超过 3 个，全文和报告使用 ZIP 打包。
+- 任务邮件正文使用纯文本 `body_file`，不把 Markdown 直接作为邮件正文。
+- 任务邮件附件不超过 3 个，全文和报告先转换为 PDF，再使用 ZIP 打包；任务摘要以 PDF 附件发送。

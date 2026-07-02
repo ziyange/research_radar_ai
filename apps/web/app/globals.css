@@ -2865,6 +2865,15 @@ input {
   background: #d97706;
 }
 
+.active-step.pending {
+  background: #fbfcfb;
+}
+
+.active-step.pending span {
+  color: #8b9691;
+  background: #eef2f0;
+}
+
 .active-step.skipped {
   background: #f8faf9;
 }
@@ -3165,6 +3174,37 @@ input {
 
 .run-detail-line.error {
   color: #a4473d;
+}
+
+.run-event-list {
+  display: grid;
+  gap: 5px;
+  max-height: 280px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.run-event-list .run-detail-line {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  align-items: start;
+  gap: 7px;
+  padding: 6px 8px;
+  background: #fbfcfb;
+  border: 1px solid #e5ece7;
+  border-radius: 8px;
+}
+
+.run-event-list .run-detail-line span {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: #087f70;
+  background: #dff4ee;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 900;
 }
 
 .run-detail-papers {

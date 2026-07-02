@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse
 from .literature_runtime.analysis import create_report
 from .literature_runtime.models import AnalyzePayload, CliResult, MailTestPayload, TaskPayload
 from .literature_runtime.fulltext import fetch_fulltext_for_paper, save_paper_asset, save_pdf_text_asset
+from .literature_runtime.markdown_pdf import markdown_file_to_pdf, markdown_to_pdf, markdown_to_plain_text
 from .literature_runtime.repository import (
     ROOT_DIR,
 )
@@ -44,6 +45,17 @@ router = APIRouter(prefix="/api/v1/literature", tags=["literature"])
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def execution_event(stage: str, status: str, message: str, **fields: Any) -> dict[str, Any]:
+    return {
+        "id": f"evt_{uuid4().hex[:10]}",
+        "at": now_iso(),
+        "stage": stage,
+        "status": status,
+        "message": message,
+        **{key: value for key, value in fields.items() if value not in (None, "", [])},
+    }
 
 
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -138,9 +150,30 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
     query_plan = await expand_queries(query)
     fetch_limit = max(120, count * 30)
     source_statuses: list[dict[str, Any]] = []
+    execution_events: list[dict[str, Any]] = [
+        execution_event(
+            "prepare",
+            "done",
+            f"读取任务参数：方向「{query}」，目标 {count} 篇，年份 {year_from or '不限'}，评分≥{min_score:g}。",
+        ),
+        execution_event(
+            "plan",
+            "done",
+            f"生成 {len(query_plan)} 个检索式：{', '.join(item['query'] for item in query_plan[:4])}。",
+        ),
+    ]
     semaphores = {"openalex": asyncio.Semaphore(2), "crossref": asyncio.Semaphore(1)}
 
     async def fetch_job(source: str, planned: dict[str, str]) -> list[dict[str, Any]]:
+        execution_events.append(
+            execution_event(
+                "source",
+                "running",
+                f"连接 {source}，查询关键词「{planned['query']}」。",
+                source=source,
+                query=planned["query"],
+            )
+        )
         try:
             async with semaphores[source]:
                 items = (
@@ -157,6 +190,16 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
                     "count": len(items),
                 }
             )
+            execution_events.append(
+                execution_event(
+                    "source",
+                    "done",
+                    f"{source} / 「{planned['query']}」返回 {len(items)} 条开放元数据。",
+                    source=source,
+                    query=planned["query"],
+                    count=len(items),
+                )
+            )
             for index, paper in enumerate(items, start=1):
                 paper["matchedQuery"] = planned["query"]
                 paper["querySource"] = planned["source"]
@@ -169,6 +212,7 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
             return items
         except Exception as exc:
             error_text = str(exc)
+            error_type = classify_source_error(error_text)
             source_statuses.append(
                 {
                     "source": source,
@@ -176,8 +220,19 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
                     "querySource": planned["source"],
                     "status": "failed",
                     "error": error_text,
-                    "errorType": classify_source_error(error_text),
+                    "errorType": error_type,
                 }
+            )
+            execution_events.append(
+                execution_event(
+                    "source",
+                    "failed",
+                    f"{source} / 「{planned['query']}」检索失败：{error_type}。",
+                    source=source,
+                    query=planned["query"],
+                    error=error_text,
+                    errorType=error_type,
+                )
             )
             return []
 
@@ -196,9 +251,53 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
         and (paper.get("rawScore") or 0) >= min_score
         and any(relevant_enough(paper, planned["query"]) for planned in query_plan)
     ]
+    execution_events.append(
+        execution_event(
+            "filter",
+            "done",
+            f"完成评分筛选：满足年份、评分和相关性条件的候选 {len(candidates)} 篇。",
+            count=len(candidates),
+        )
+    )
     unique, duplicates = dedupe(repository.library["papers"], candidates)
+    execution_events.append(
+        execution_event(
+            "dedupe",
+            "done",
+            f"完成跨源/本地去重：新文献 {len(unique)} 篇，重复 {len(duplicates)} 篇。",
+            uniqueCount=len(unique),
+            duplicateCount=len(duplicates),
+        )
+    )
     selected = sorted(unique, key=lambda item: item.get("rawScore") or 0, reverse=True)[:count]
-    saved = [await save_paper_asset(paper, payload.get("downloadOpenPdf") is not False) for paper in selected]
+    saved = []
+    for paper in selected:
+        execution_events.append(
+            execution_event(
+                "save",
+                "running",
+                f"保存文献：{paper.get('title') or paper.get('doi') or paper.get('id')}。",
+                paperId=paper.get("id"),
+                title=paper.get("title"),
+            )
+        )
+        enriched = await save_paper_asset(paper, payload.get("downloadOpenPdf") is not False)
+        saved.append(enriched)
+        fulltext_status = enriched.get("fullTextStatus") or ("ready" if enriched.get("localFullTextPath") else "metadata_only")
+        execution_events.append(
+            execution_event(
+                "save",
+                "done",
+                f"已入库：{enriched.get('title') or enriched.get('doi')}；全文状态：{fulltext_status}。",
+                paperId=enriched.get("id"),
+                title=enriched.get("title"),
+                fullTextStatus=fulltext_status,
+            )
+        )
+    if not saved:
+        execution_events.append(
+            execution_event("save", "skipped", "没有新的可入库文献，跳过保存、全文获取、AI 分析和任务邮件。")
+        )
     run = {
         "id": f"scan_{uuid4()}",
         "taskId": task_id,
@@ -224,6 +323,7 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
         "exhaustedReason": ""
         if len(saved) >= count
         else ("没有找到满足评分、时间和去重条件的新文献" if not unique else "满足条件的新文献少于目标篇数"),
+        "executionEvents": execution_events,
         "createdAt": now_iso(),
     }
     repository.library["papers"] = [*saved, *repository.library["papers"]]
@@ -444,15 +544,22 @@ def delivery_body_markdown(kind: str, paper: dict[str, Any], task: dict[str, Any
 
 def delivery_attachments(delivery_id: str, paper: dict[str, Any], report: dict[str, Any] | None) -> list[str]:
     attachments: list[str] = []
-    candidates = [paper.get("localPdfPath")]
+    candidates = [
+        paper.get("localPdfPath"),
+        paper.get("localFullTextPath"),
+        paper.get("localMarkdownPath"),
+        (report or {}).get("markdownPath"),
+    ]
     for source in candidates:
         path = resolve_reader_file(str(source or ""))
         if not path:
             continue
-        suffix = path.suffix or ".bin"
+        suffix = ".pdf" if path.suffix.lower() == ".md" else path.suffix or ".bin"
         target = repository.mail_dir / f"{delivery_id}-{slug(path.stem, 42)}{suffix}"
         try:
-            if path.resolve() != target.resolve():
+            if path.suffix.lower() == ".md":
+                markdown_file_to_pdf(path, target, title=path.stem)
+            elif path.resolve() != target.resolve():
                 shutil.copyfile(path, target)
             attachments.append(str(target.relative_to(ROOT_DIR)).replace("\\", "/"))
         except OSError:
@@ -460,6 +567,21 @@ def delivery_attachments(delivery_id: str, paper: dict[str, Any], report: dict[s
         if len(attachments) >= 3:
             break
     return attachments
+
+
+def write_mail_body_files(delivery_id: str, subject: str, markdown: str) -> dict[str, str]:
+    base = repository.mail_dir / f"{slug(subject)}-{delivery_id}"
+    markdown_path = base.with_suffix(".md")
+    text_path = base.with_suffix(".txt")
+    pdf_path = base.with_suffix(".pdf")
+    markdown_path.write_text(markdown, encoding="utf-8")
+    text_path.write_text(markdown_to_plain_text(markdown), encoding="utf-8")
+    markdown_to_pdf(markdown, pdf_path, title=subject)
+    return {
+        "markdownPath": str(markdown_path.relative_to(ROOT_DIR)).replace("\\", "/"),
+        "bodyTextPath": str(text_path.relative_to(ROOT_DIR)).replace("\\", "/"),
+        "bodyPdfPath": str(pdf_path.relative_to(ROOT_DIR)).replace("\\", "/"),
+    }
 
 
 def readable_datetime(value: str | None) -> str:
@@ -548,9 +670,9 @@ def task_digest_markdown(
             "",
             "## 附件说明",
             "",
-            "- `fulltexts-*.zip`: 文献 PDF；若没有 PDF，则放入系统保存的全文/元数据 Markdown。",
-            "- `analysis-reports-*.zip`: 开启 AI 分析且成功生成报告时，包含单篇 AI 报告 Markdown。",
-            "- `manifest-*.md`: 附件清单和文献对应关系。",
+            "- `fulltexts-*.zip`: 文献 PDF；若没有 PDF，则把系统保存的全文 Markdown 转为 PDF 后放入。",
+            "- `analysis-reports-*.zip`: 开启 AI 分析且成功生成报告时，包含单篇 AI 报告 PDF。",
+            "- `task-summary-*.pdf`: 任务摘要、执行结果、附件清单和文献对应关系。",
             "",
         ]
     )
@@ -572,11 +694,21 @@ def zip_files(zip_path: Path, files: list[tuple[str, Path]]) -> str | None:
     return str(zip_path.relative_to(ROOT_DIR)).replace("\\", "/")
 
 
+def pdf_asset_for_markdown(source: Path, target_name: str, title: str = "") -> Path | None:
+    target = repository.mail_dir / f"{slug(target_name, 72)}.pdf"
+    try:
+        markdown_file_to_pdf(source, target, title=title or source.stem)
+        return target
+    except Exception:
+        return None
+
+
 def build_task_digest_attachments(
     delivery_id: str,
     run: dict[str, Any],
     papers: list[dict[str, Any]],
     reports: list[dict[str, Any]],
+    summary_pdf_path: Path | None = None,
 ) -> list[str]:
     attachments: list[str] = []
     fulltext_files: list[tuple[str, Path]] = []
@@ -584,8 +716,14 @@ def build_task_digest_attachments(
         relative = paper.get("localPdfPath") or paper.get("localFullTextPath") or paper.get("localMarkdownPath")
         path = resolve_reader_file(str(relative or ""))
         if path:
-            suffix = path.suffix or ".md"
-            fulltext_files.append((f"{index:02d}-{slug(paper.get('title'), 48)}{suffix}", path))
+            title_slug = slug(paper.get("title"), 48)
+            if path.suffix.lower() == ".md":
+                pdf_path = pdf_asset_for_markdown(path, f"{index:02d}-{title_slug}-fulltext", title=paper.get("title") or "")
+                if pdf_path:
+                    fulltext_files.append((f"{index:02d}-{title_slug}.pdf", pdf_path))
+            else:
+                suffix = path.suffix or ".bin"
+                fulltext_files.append((f"{index:02d}-{title_slug}{suffix}", path))
     fulltexts_zip = zip_files(repository.mail_dir / f"fulltexts-{run.get('id') or delivery_id}.zip", fulltext_files)
     if fulltexts_zip:
         attachments.append(fulltexts_zip)
@@ -593,7 +731,9 @@ def build_task_digest_attachments(
     for index, report in enumerate(reports, 1):
         path = resolve_reader_file(str(report.get("markdownPath") or ""))
         if path:
-            report_files.append((f"{index:02d}-{slug(report.get('title'), 48)}.md", path))
+            pdf_path = pdf_asset_for_markdown(path, f"{index:02d}-{slug(report.get('title'), 48)}-analysis", title=report.get("title") or "")
+            if pdf_path:
+                report_files.append((f"{index:02d}-{slug(report.get('title'), 48)}.pdf", pdf_path))
     reports_zip = zip_files(repository.mail_dir / f"analysis-reports-{run.get('id') or delivery_id}.zip", report_files)
     if reports_zip:
         attachments.append(reports_zip)
@@ -612,16 +752,74 @@ def build_task_digest_attachments(
     for index, report in enumerate(reports, 1):
         manifest_lines.append(f"{index}. {report.get('title') or report.get('id')} | {report.get('markdownPath') or '无'}")
     manifest_path.write_text("\n".join(manifest_lines), encoding="utf-8")
-    attachments.append(str(manifest_path.relative_to(ROOT_DIR)).replace("\\", "/"))
+    summary_or_manifest_pdf = summary_pdf_path
+    if not summary_or_manifest_pdf:
+        summary_or_manifest_pdf = pdf_asset_for_markdown(
+            manifest_path,
+            f"manifest-{run.get('id') or delivery_id}",
+            title=f"任务附件清单 {run.get('id') or delivery_id}",
+        )
+    if summary_or_manifest_pdf:
+        attachments.append(str(summary_or_manifest_pdf.relative_to(ROOT_DIR)).replace("\\", "/"))
     return attachments[:3]
+
+
+def task_digest_plain_text(
+    task: dict[str, Any],
+    run: dict[str, Any],
+    papers: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+    attachments: list[str],
+) -> str:
+    source_statuses = run.get("sourceStatuses") or []
+    source_summaries = []
+    for item in source_statuses[:8]:
+        if item.get("status") == "succeeded":
+            source_summaries.append(f"{item.get('source')} / {item.get('query')}：成功，返回 {item.get('count') or 0} 条")
+        else:
+            source_summaries.append(f"{item.get('source')} / {item.get('query')}：失败，{item.get('errorType') or 'unknown'}")
+    paper_lines = []
+    for index, paper in enumerate(papers[:20], 1):
+        paper_lines.append(
+            f"{index}. {paper.get('title') or 'Untitled'} | {paper.get('year') or '未知'} | "
+            f"{paper.get('journal') or paper.get('source') or '未知'} | DOI: {paper.get('doi') or '未提供'}"
+        )
+    return "\n".join(
+        [
+            "研知雷达任务执行完成",
+            "",
+            f"任务名称：{task.get('name') or task.get('query') or '采集任务'}",
+            f"执行时间：{readable_datetime(run.get('createdAt'))}",
+            f"研究方向：{task.get('query') or run.get('query') or ''}",
+            f"执行参数：目标 {run.get('count') or task.get('count') or ''} 篇；"
+            f"起始年份 {run.get('yearFrom') or task.get('yearFrom') or '不限'}；"
+            f"最低评分 {run.get('minScore') if run.get('minScore') is not None else task.get('minScore', '')}",
+            "",
+            "执行结果：",
+            f"保存 {run.get('savedCount') or 0} 篇；候选 {run.get('candidateCount') or 0} 篇；"
+            f"重复 {run.get('duplicateCount') or 0} 篇；"
+            f"AI 报告 {len(reports)} 份；{'存在来源降级' if run.get('degraded') else '数据源正常'}。",
+            "",
+            "来源状态：",
+            *(source_summaries or ["未记录来源状态"]),
+            "",
+            "文献列表：",
+            *(paper_lines or ["本次没有新入库文献。"]),
+            "",
+            "附件：",
+            *(attachments or ["本次没有可发送附件。"]),
+            "",
+            "说明：邮件正文使用纯文本以保证移动端可读；完整任务摘要、表格、全文与 AI 报告请查看 PDF/ZIP 附件。",
+        ]
+    )
 
 
 def add_mail_delivery(kind: str, paper: dict[str, Any], task: dict[str, Any] | None = None, report: dict[str, Any] | None = None, recipients: list[str] | None = None) -> dict[str, Any]:
     id_ = f"mail_{uuid4()}"
     subject = delivery_subject(kind, paper, task)
     body = delivery_body_markdown(kind, paper, task, report)
-    body_path = repository.mail_dir / f"{slug(subject)}-{id_}.md"
-    body_path.write_text(body, encoding="utf-8")
+    body_files = write_mail_body_files(id_, subject, body)
+    attachments = unique_strings([*delivery_attachments(id_, paper, report), body_files["bodyPdfPath"]])[:3]
     delivery = {
         "id": id_,
         "kind": kind,
@@ -634,9 +832,11 @@ def add_mail_delivery(kind: str, paper: dict[str, Any], task: dict[str, Any] | N
         "cc": mail_copy_for_task(task, "ccEmails"),
         "bcc": mail_copy_for_task(task, "bccEmails"),
         "subject": subject,
-        "markdownPath": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
-        "bodyFile": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
-        "attachments": delivery_attachments(id_, paper, report),
+        "markdownPath": body_files["markdownPath"],
+        "bodyTextPath": body_files["bodyTextPath"],
+        "bodyPdfPath": body_files["bodyPdfPath"],
+        "bodyFile": body_files["bodyTextPath"],
+        "attachments": attachments,
         "status": "queued",
         "confirmationToken": "",
         "confirmationSummary": "",
@@ -660,9 +860,15 @@ def add_task_digest_delivery(
     run_time = readable_datetime(run.get("createdAt"))[:16]
     subject = f"[研知雷达] {str(task_title)[:58]} · {run_time}"
     body = task_digest_markdown(task, run, papers, reports)
-    body_path = repository.mail_dir / f"{slug(subject)}-{id_}.md"
-    body_path.write_text(body, encoding="utf-8")
-    attachments = build_task_digest_attachments(id_, run, papers, reports)
+    body_files = write_mail_body_files(id_, subject, body)
+    summary_pdf = resolve_reader_file(body_files["bodyPdfPath"])
+    attachments = build_task_digest_attachments(id_, run, papers, reports, summary_pdf)
+    body_text_path = resolve_reader_file(body_files["bodyTextPath"])
+    if body_text_path:
+        body_text_path.write_text(
+            task_digest_plain_text(task, run, papers, reports, attachments),
+            encoding="utf-8",
+        )
     delivery = {
         "id": id_,
         "kind": "task_digest",
@@ -677,9 +883,11 @@ def add_task_digest_delivery(
         "cc": mail_copy_for_task(task, "ccEmails"),
         "bcc": mail_copy_for_task(task, "bccEmails"),
         "subject": subject,
-        "markdownPath": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
-        "summaryMarkdownPath": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
-        "bodyFile": str(body_path.relative_to(ROOT_DIR)).replace("\\", "/"),
+        "markdownPath": body_files["markdownPath"],
+        "summaryMarkdownPath": body_files["markdownPath"],
+        "bodyTextPath": body_files["bodyTextPath"],
+        "bodyPdfPath": body_files["bodyPdfPath"],
+        "bodyFile": body_files["bodyTextPath"],
         "attachments": attachments,
         "status": "queued",
         "confirmationToken": "",
@@ -750,7 +958,9 @@ def attempt_mail_delivery(
         delivery.update(status="failed", error=status.get("message") or "AGENT_MAIL_NOT_READY")
         repository._persist_item("mailDeliveries", delivery)
         return delivery
-    body_path = resolve_reader_file(delivery["markdownPath"])
+    body_path = resolve_reader_file(
+        str(delivery.get("bodyTextPath") or delivery.get("bodyFile") or delivery.get("markdownPath") or "")
+    )
     if not body_path:
         delivery.update(status="failed", error="MAIL_BODY_FILE_MISSING")
         repository._persist_item("mailDeliveries", delivery)
@@ -947,21 +1157,92 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
                 for paper in result["papers"]:
                     paper_with_fulltext = paper
                     if not paper_with_fulltext.get("localFullTextPath"):
+                        result["run"].setdefault("executionEvents", []).append(
+                            execution_event(
+                                "fulltext",
+                                "running",
+                                f"尝试获取 DOI/来源全文：{paper.get('title') or paper.get('doi')}。",
+                                paperId=paper.get("id"),
+                                title=paper.get("title"),
+                            )
+                        )
                         paper_with_fulltext = (await fetch_fulltext_for_paper(dict(paper)))["paper"]
+                        fulltext_status = paper_with_fulltext.get("fullTextStatus") or (
+                            "ready" if paper_with_fulltext.get("localFullTextPath") else "unavailable"
+                        )
+                        result["run"].setdefault("executionEvents", []).append(
+                            execution_event(
+                                "fulltext",
+                                "done" if paper_with_fulltext.get("localFullTextPath") else "failed",
+                                f"{'获取全文成功' if paper_with_fulltext.get('localFullTextPath') else '未获取到可分析全文'}：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
+                                paperId=paper_with_fulltext.get("id"),
+                                title=paper_with_fulltext.get("title"),
+                                fullTextStatus=fulltext_status,
+                            )
+                        )
                     digest_papers.append(paper_with_fulltext)
                     if paper_with_fulltext.get("localFullTextPath"):
+                        result["run"].setdefault("executionEvents", []).append(
+                            execution_event(
+                                "analysis",
+                                "running",
+                                f"开始 AI 分析：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
+                                paperId=paper_with_fulltext.get("id"),
+                                title=paper_with_fulltext.get("title"),
+                            )
+                        )
                         report = await create_report([paper_with_fulltext], task.get("query") or "")
                         digest_reports.append(report)
+                        result["run"].setdefault("executionEvents", []).append(
+                            execution_event(
+                                "analysis",
+                                "done",
+                                f"AI 分析已完成：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
+                                paperId=paper_with_fulltext.get("id"),
+                                title=paper_with_fulltext.get("title"),
+                                reportId=report.get("id"),
+                            )
+                        )
+                    else:
+                        result["run"].setdefault("executionEvents", []).append(
+                            execution_event(
+                                "analysis",
+                                "skipped",
+                                f"缺少可读全文，跳过 AI 分析：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
+                                paperId=paper_with_fulltext.get("id"),
+                                title=paper_with_fulltext.get("title"),
+                            )
+                        )
             else:
                 digest_papers = list(result["papers"])
             if digest_papers:
+                result["run"].setdefault("executionEvents", []).append(
+                    execution_event(
+                        "mail",
+                        "running",
+                        f"生成任务汇总邮件：To {', '.join(task.get('recipientEmails') or [])}。",
+                    )
+                )
                 delivery = add_task_digest_delivery(task, result["run"], digest_papers, digest_reports)
                 result["taskDigestDelivery"] = delivery
+                result["run"].setdefault("executionEvents", []).append(
+                    execution_event(
+                        "mail",
+                        "done" if delivery.get("status") == "sent" else "warning",
+                        f"任务汇总邮件已生成：{delivery.get('status')}。",
+                        deliveryId=delivery.get("id"),
+                        deliveryStatus=delivery.get("status"),
+                    )
+                )
             else:
                 result["taskDigestDelivery"] = None
         elif task.get("notifyAfterRun"):
             result["taskDigestDelivery"] = None
+            result["run"].setdefault("executionEvents", []).append(
+                execution_event("mail", "skipped", "本次没有新入库文献，未生成任务汇总邮件。")
+            )
         repository._persist_item("tasks", task)
+        repository._persist_item("scanRuns", result["run"])
         result["tasks"] = repository.tasks
         result["mailDeliveries"] = repository.serialize_library()["mailDeliveries"]
         return result
