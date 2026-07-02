@@ -3,18 +3,8 @@ import { setTimeout as delay } from "node:timers/promises";
 
 const retryableCodes = new Set(["EBUSY", "ENOTEMPTY", "EPERM"]);
 const nextTargets = [
-  "server",
-  "static",
-  "types",
-  "cache/webpack",
-  "app-build-manifest.json",
-  "build-manifest.json",
-  "package.json",
-  "prerender-manifest.json",
-  "react-loadable-manifest.json",
-  "routes-manifest.json",
-  "trace",
-].map((target) => new URL(`../.next/${target}`, import.meta.url));
+  "../.next-dev",
+].map((target) => new URL(target, import.meta.url));
 
 async function removeTarget(target) {
   for (let attempt = 1; attempt <= 6; attempt += 1) {

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "clean:web": "npm --workspace apps/web run clean",
     "dev:web": "npm --workspace apps/web run dev",
     "build": "npm --workspace apps/web run build",
     "lint:web": "npm --workspace apps/web run lint"

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "clean": "node scripts/clean-next-cache.mjs",
     "dev": "node scripts/clean-next-cache.mjs && next dev",
     "build": "next build",
     "lint": "eslint . --max-warnings=0"

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import html
 import json
+import math
 import re
 from typing import Any
 from uuid import uuid4
@@ -123,7 +124,29 @@ def score_paper(paper: dict[str, Any], query: str, year_from: int | None) -> flo
     abstract = 10 if paper.get("abstract") else 0
     doi = 5 if paper.get("doi") else 0
     phrase = 12 if query and query.lower() in text else 0
-    return round((hits * 14 + coverage * 20 + phrase + recency + citations + access + abstract + doi) * 10) / 10
+    lexical_score = hits * 14 + coverage * 20 + phrase + recency + citations + access + abstract + doi
+
+    # Crossref/OpenAlex can return English metadata for Chinese search strings.
+    # In that case lexical term hits are impossible, so preserve the provider's
+    # relevance ordering and still let recency, quality and dedupe filters apply.
+    has_cjk_query = bool(re.search(r"[\u4e00-\u9fff]", query))
+    has_latin_term = any(re.search(r"[a-zA-Z]", term) for term in terms)
+    provider_score = 0.0
+    if has_cjk_query and not has_latin_term:
+        try:
+            rank = max(1, int(paper.get("providerRank") or 999))
+        except (TypeError, ValueError):
+            rank = 999
+        rank_score = max(0.0, 84.0 - (rank - 1) * 1.1)
+        try:
+            source_score = float(paper.get("providerScore") or 0)
+        except (TypeError, ValueError):
+            source_score = 0.0
+        source_score = min(84.0, math.log1p(max(0.0, source_score)) * 18.0)
+        quality_score = recency * 0.45 + citations * 0.25 + access + abstract + doi
+        provider_score = max(rank_score, source_score) + quality_score
+
+    return round(min(100.0, max(lexical_score, provider_score)) * 10) / 10
 
 
 def relevant_enough(paper: dict[str, Any], query: str) -> bool:
@@ -251,6 +274,7 @@ def normalize_openalex(work: dict[str, Any]) -> dict[str, Any]:
         "landingCandidates": landing_candidates,
         "openAccess": bool(open_access.get("is_oa") or pdf_candidates),
         "citedByCount": int(work.get("cited_by_count") or 0),
+        "providerScore": float(work.get("relevance_score") or 0),
         "rawScore": 0,
     }
     paper["id"] = stable_paper_id(paper)
@@ -300,6 +324,7 @@ def normalize_crossref(item: dict[str, Any]) -> dict[str, Any]:
         "landingCandidates": unique_strings([item.get("URL"), doi_url(doi)]),
         "openAccess": bool(pdf_candidates or item.get("license")),
         "citedByCount": int(item.get("is-referenced-by-count") or 0),
+        "providerScore": float(item.get("score") or 0),
         "rawScore": 0,
     }
     paper["id"] = stable_paper_id(paper)

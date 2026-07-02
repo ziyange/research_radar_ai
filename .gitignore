@@ -10,6 +10,7 @@ pytest-cache-files-*/
 
 node_modules/
 .next/
+.next-dev/
 dist/
 coverage/
 output/

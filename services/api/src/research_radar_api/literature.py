@@ -157,9 +157,11 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
                     "count": len(items),
                 }
             )
-            for paper in items:
+            for index, paper in enumerate(items, start=1):
                 paper["matchedQuery"] = planned["query"]
                 paper["querySource"] = planned["source"]
+                paper["providerRank"] = index
+                paper["providerSource"] = source
                 paper["rawScore"] = max(
                     score_paper(paper, query, year_from),
                     score_paper(paper, planned["query"], year_from),
@@ -938,7 +940,7 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
         task["lastRunFinishedAt"] = now_iso()
         task["lastRunSavedCount"] = result["run"]["savedCount"]
         task["lastRunId"] = result["run"]["id"]
-        if task.get("notifyAfterRun"):
+        if task.get("notifyAfterRun") and (result["run"].get("savedCount") or 0) > 0:
             digest_papers: list[dict[str, Any]] = []
             digest_reports: list[dict[str, Any]] = []
             if task.get("autoAnalyze"):
@@ -957,6 +959,8 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
                 result["taskDigestDelivery"] = delivery
             else:
                 result["taskDigestDelivery"] = None
+        elif task.get("notifyAfterRun"):
+            result["taskDigestDelivery"] = None
         repository._persist_item("tasks", task)
         result["tasks"] = repository.tasks
         result["mailDeliveries"] = repository.serialize_library()["mailDeliveries"]

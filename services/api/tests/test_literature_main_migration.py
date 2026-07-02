@@ -146,9 +146,65 @@ def test_literature_cjk_query_keeps_provider_ranked_english_records() -> None:
         "doi": "10.0000/nano-plant",
         "abstract": "Nanoparticles and nanomaterials regulate plant growth under abiotic stress.",
         "keywords": ["nanomaterials", "plants"],
+        "providerRank": 1,
+        "providerScore": 75,
+        "year": 2026,
+        "openAccess": True,
     }
 
     assert literature.relevant_enough(paper, "纳米材料 植物") is True
+    assert literature.score_paper(paper, "纳米材料 植物", 2021) >= 70
+
+
+def test_literature_cjk_query_can_save_crossref_provider_ranked_results(monkeypatch) -> None:
+    async def fake_openalex(query, year_from, limit):  # noqa: ANN001, ARG001
+        raise RuntimeError("Server error '503 Service Unavailable'")
+
+    async def fake_crossref(query, year_from, limit):  # noqa: ANN001, ARG001
+        return [
+            {
+                "id": "paper_test_cjk_crossref_ranked",
+                "title": "Nanomaterials regulate plant stress tolerance",
+                "doi": "10.0000/cjk-crossref-ranked",
+                "year": 2026,
+                "journal": "Crossref Test",
+                "authors": ["Ranked Author"],
+                "abstract": "Nanoparticles and nanomaterials improve plant growth and stress tolerance.",
+                "keywords": ["nanomaterials", "plants"],
+                "source": "Crossref",
+                "sourceUrl": "https://doi.org/10.0000/cjk-crossref-ranked",
+                "landingPageUrl": "https://doi.org/10.0000/cjk-crossref-ranked",
+                "openAccess": True,
+                "citedByCount": 4,
+                "providerScore": 75,
+                "rawScore": 0,
+            }
+        ]
+
+    async def fake_expand_queries(query):  # noqa: ANN001
+        return [{"query": query, "source": "user"}]
+
+    monkeypatch.setattr(literature, "fetch_openalex", fake_openalex)
+    monkeypatch.setattr(literature, "fetch_crossref", fake_crossref)
+    monkeypatch.setattr(literature, "expand_queries", fake_expand_queries)
+
+    response = client.post(
+        "/api/v1/literature/scan",
+        json={
+            "query": "纳米材料 植物",
+            "count": 1,
+            "yearFrom": 2021,
+            "minScore": 70,
+            "sources": ["openalex", "crossref"],
+            "downloadOpenPdf": False,
+        },
+    )
+
+    assert response.status_code == 200
+    run = response.json()["run"]
+    assert run["savedCount"] == 1
+    assert run["candidateCount"] == 1
+    assert run["degraded"] is True
 
 
 def test_literature_mock_analysis_generates_markdown_report() -> None:
