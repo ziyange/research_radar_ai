@@ -115,7 +115,7 @@ export const api = {
   },
   async getMailOutbox() {
     const response = await fetch(`${API_BASE}/mail/outbox`);
-    return parseApiResponse(response, "无法读取邮箱推送记录");
+    return parseApiResponse(response, "无法读取邮件状态");
   },
   async confirmMailDelivery(id) {
     const response = await fetch(`${API_BASE}/mail/deliveries/${encodeURIComponent(id)}:confirm`, { method: "POST" });

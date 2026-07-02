@@ -2814,6 +2814,43 @@ input {
   gap: 7px;
 }
 
+.active-current-step {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  align-items: start;
+  gap: 10px;
+  padding: 11px 12px;
+  background: #fff;
+  border: 1px solid #d7e7e1;
+  border-radius: 10px;
+}
+
+.active-current-step > span {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: #fff;
+  background: #087f70;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 900;
+  animation: pulse-tag 1.2s ease-in-out infinite;
+}
+
+.active-current-step strong {
+  display: block;
+  color: #0f2f2b;
+  font-size: 12px;
+}
+
+.active-current-step p {
+  margin: 3px 0 0;
+  color: #2e3b36;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
 .active-step {
   display: grid;
   grid-template-columns: 24px 1fr;

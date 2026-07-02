@@ -354,38 +354,7 @@ export function App() {
       setLibrary(data.library);
       if (data.tasks) setTasks(data.tasks);
       setSelectedPaperId((current) => current || data.library?.papers?.[0]?.id || null);
-      setActiveRunLog({
-        ...buildRunningLog(effectiveTask),
-        id: data.run.id,
-        runId: data.run.id,
-        status: data.run.savedCount > 0 ? "done" : "warning",
-        startedAt: data.run.createdAt,
-        savedPapers: data.papers || [],
-        mailDeliveries: data.mailDeliveries || [],
-        queryPlan: data.run.queryPlan || [],
-        sourceStatuses: data.run.sourceStatuses || [],
-        targetMet: data.run.targetMet,
-        exhaustedReason: data.run.exhaustedReason,
-        steps: executionEventsToSteps(data.run.executionEvents, [
-          { key: "prepare", status: "done", text: "已读取任务参数并生成检索计划。" },
-          { key: "search", status: "done", text: `公开数据源检索完成，候选 ${data.run.candidateCount || 0} 篇。` },
-          { key: "save", status: "done", text: `完成：保存 ${data.run.savedCount || 0} 篇，去重 ${data.run.duplicateCount || 0} 篇。` },
-          ...(task.autoAnalyze
-            ? [
-                data.run.savedCount > 0
-                  ? { key: "analysis", status: "done", text: "AI 分析已由后端逐篇处理并落盘。" }
-                  : { key: "analysis", status: "skipped", text: "未保存新文献，已跳过 AI 分析。" },
-              ]
-            : []),
-          ...(pushReady
-            ? [
-                data.taskDigestDelivery
-                  ? { key: "mail", status: "done", text: "任务汇总邮件已生成。" }
-                  : { key: "mail", status: "skipped", text: "没有新文献，未生成任务邮件。" },
-              ]
-            : []),
-        ]),
-      });
+      setActiveRunLog(null);
       setExpandedRunIds((current) => ({ ...current, [data.run.id]: true }));
       setStatus({
         tone: data.run.savedCount > 0 ? "success" : "warning",
@@ -662,7 +631,7 @@ export function App() {
               <div className="workspace-title">
                 <span>采集任务</span>
                 <h1>采集任务列表</h1>
-                <p>管理可复用的文献采集任务，一键执行或编辑配置。自动执行和邮箱推送互相独立，推送会在任务完成后按条发送文献或 AI 分析。</p>
+                <p>管理可复用的文献采集任务，一键执行或编辑配置。自动执行和邮箱推送互相独立，推送会在任务完成后发送一封任务汇总邮件。</p>
               </div>
               <div className="task-header-actions">
                 <button
@@ -684,6 +653,9 @@ export function App() {
               {tasks.length ? (
                 tasks.map((task) => {
                   const pushReady = taskMailPushReady(task);
+                  const latestTaskMail = [...(library.mailDeliveries || [])]
+                    .filter((delivery) => delivery.taskId === task.id && delivery.kind === "task_digest")
+                    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())[0];
                   return (
                   <div className="task-row" key={task.id}>
                     <div className="task-row-top">
@@ -739,6 +711,11 @@ export function App() {
                       </span>
                       {pushReady ? (
                         <span className="task-tag on">To {task.recipientEmails?.length || 0}</span>
+                      ) : null}
+                      {latestTaskMail ? (
+                        <span className={`task-tag ${latestTaskMail.status === "sent" ? "on" : ""}`}>
+                          最近邮件：{mailStatusText(latestTaskMail.status)}
+                        </span>
                       ) : null}
                     </div>
                   </div>

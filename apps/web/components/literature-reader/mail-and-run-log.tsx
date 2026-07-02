@@ -115,6 +115,10 @@ export function MailBindModal({ mailStatus, authUrl, loading, onClose, onBind, o
 function ActiveRunLogCard({ log, runAnalyzeState }) {
   if (!log) return null;
   const analyzeState = log.runId ? runAnalyzeState[log.runId] : null;
+  const currentStep =
+    (log.steps || []).find((step) => step.status === "running") ||
+    (log.steps || []).find((step) => step.status === "pending") ||
+    (log.steps || [])[0];
   return (
     <div className={`active-run-card ${log.status}`}>
       <div className="active-run-header">
@@ -133,60 +137,21 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
           ))}
         </div>
       ) : null}
-      <div className="active-step-list">
-        {(log.steps || []).map((step, index) => (
-          <div className={`active-step ${step.status}`} key={step.key || index}>
-            <span>{step.status === "done" ? "✓" : step.status === "running" ? "…" : step.status === "failed" ? "!" : step.status === "skipped" ? "−" : step.status === "warning" ? "!" : index + 1}</span>
-            <p>{step.text}</p>
+      {currentStep ? (
+        <div className="active-current-step">
+          <span>{currentStep.status === "failed" ? "!" : "…"}</span>
+          <div>
+            <strong>当前步骤</strong>
+            <p>{currentStep.text}</p>
           </div>
-        ))}
-      </div>
+        </div>
+      ) : null}
+      {analyzeState ? (
+        <p className="active-run-message warn">AI 分析 {analyzeState.done}/{analyzeState.total}</p>
+      ) : null}
       {log.errorMessage ? <p className="active-run-message error">{log.errorMessage}</p> : null}
       {log.exhaustedReason && log.targetMet === false ? (
         <p className="active-run-message warn">{log.exhaustedReason}</p>
-      ) : null}
-      {log.queryPlan?.length ? (
-        <div className="active-run-subsection">
-          <strong>实际检索式</strong>
-          {log.queryPlan.slice(0, 8).map((item, index) => (
-            <p key={`${item.source}-${item.query}-${index}`}>{index + 1}. [{item.source}] {item.query}</p>
-          ))}
-        </div>
-      ) : null}
-      {log.sourceStatuses?.length ? (
-        <div className="active-run-subsection">
-          <strong>来源返回</strong>
-          <SourceStatusDigest statuses={log.sourceStatuses} />
-          <details className="source-status-details">
-            <summary>查看来源详情</summary>
-            {log.sourceStatuses.map((item, index) => (
-              <p className={item.status === "failed" ? "error" : ""} key={`${item.source}-${item.query}-${index}`}>
-                {item.source} / {item.query}：{item.status === "succeeded" ? `返回 ${item.count || 0} 条` : `失败，${item.error || "未知原因"}`}
-              </p>
-            ))}
-          </details>
-        </div>
-      ) : null}
-      {log.savedPapers?.length ? (
-        <div className="active-run-subsection">
-          <strong>
-            本次入库
-            {analyzeState ? <em>AI 分析 {analyzeState.done}/{analyzeState.total}</em> : null}
-          </strong>
-          {log.savedPapers.slice(0, 8).map((paper) => (
-            <p key={paper.id}>{paper.title}</p>
-          ))}
-        </div>
-      ) : null}
-      {log.mailDeliveries?.length ? (
-        <div className="active-run-subsection">
-          <strong>邮箱推送</strong>
-          {log.mailDeliveries.slice(0, 8).map((delivery) => (
-            <p key={delivery.id}>
-              {deliveryKindLabel(delivery.kind)} · {mailStatusText(delivery.status)}
-            </p>
-          ))}
-        </div>
       ) : null}
     </div>
   );
@@ -276,17 +241,14 @@ function canRetryMailDelivery(delivery) {
   return /confirmation token|AGENT_MAIL|MAIL_/i.test(error);
 }
 
-function MailDeliveryList({ deliveries, onConfirmMailDelivery, onRetryMailDelivery, loading }) {
-  const latest = [...(deliveries || [])]
-    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
-    .slice(0, 8);
+function RunMailDeliverySection({ deliveries, onConfirmMailDelivery, onRetryMailDelivery, loading }) {
+  const latest = [...(deliveries || [])].sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
   if (!latest.length) return null;
   return (
-    <div className="mail-delivery-list">
-      <div className="mail-delivery-title">
-        <strong>邮箱推送记录</strong>
-        <span>{latest.length} 条最近记录</span>
-      </div>
+    <div className="run-detail-section">
+      <p className="run-detail-label">邮箱推送</p>
       {latest.map((delivery) => (
         <div className={`mail-delivery-row ${delivery.status}`} key={delivery.id}>
           <div>
@@ -369,12 +331,6 @@ export function RunLogList({
         ) : null}
       </div>
       <ActiveRunLogCard log={activeRunLog} runAnalyzeState={runAnalyzeState} />
-      <MailDeliveryList
-        deliveries={mailDeliveries || []}
-        onConfirmMailDelivery={onConfirmMailDelivery}
-        onRetryMailDelivery={onRetryMailDelivery}
-        loading={loading}
-      />
       <div className="run-list">
         {sortedRuns.length ? (
           sortedRuns.map((run) => {
@@ -384,6 +340,7 @@ export function RunLogList({
               .map((id) => papers.find((p) => p.id === id))
               .filter(Boolean);
             const analyzeState = runAnalyzeState[run.id];
+            const runMailDeliveries = (mailDeliveries || []).filter((delivery) => delivery.runId === run.id);
             return (
               <div className={`run-item ${expanded ? "open" : ""}`} key={run.id}>
                 <div className="run-summary" onClick={() => toggle(run.id)}>
@@ -484,6 +441,12 @@ export function RunLogList({
                         </ul>
                       </div>
                     ) : null}
+                    <RunMailDeliverySection
+                      deliveries={runMailDeliveries}
+                      onConfirmMailDelivery={onConfirmMailDelivery}
+                      onRetryMailDelivery={onRetryMailDelivery}
+                      loading={loading}
+                    />
                   </div>
                 ) : null}
               </div>
