@@ -428,6 +428,19 @@ def confirmation_token_invalid(output: str) -> bool:
     return "confirmation token" in message and ("expired" in message or "invalid" in message)
 
 
+def classify_agent_mail_auth_state(code: int, output: str) -> tuple[str, str, bool]:
+    lowered = (output or "").lower()
+    if code == 0:
+        return ("authorized", "", False)
+    if "refresh.lock" in lowered or "failed to acquire refresh lock" in lowered:
+        return ("refresh_failed", "授权刷新锁被占用或无法访问，请重新登录邮箱。", True)
+    if "context deadline exceeded" in lowered or "oauth/token" in lowered:
+        return ("refresh_failed", "授权刷新请求超时，请重新登录邮箱。", True)
+    if "authorization required" in lowered or "auth login" in lowered or code == 3:
+        return ("expired", "邮箱授权已失效，请重新登录。", True)
+    return ("unauthorized", "邮箱未绑定或暂不可用。", True)
+
+
 def mail_status() -> dict[str, Any]:
     settings = get_settings()
     if settings.email_provider == "smtp":
@@ -449,12 +462,14 @@ def mail_status() -> dict[str, Any]:
     cli = agent_mail_cli_path()
     if not shutil.which(cli) and not Path(cli).exists():
         return {"enabled": enabled, "installed": False, "authorized": False, "email": "", "sendCapable": False, "cli": cli, "message": "Agent Mail CLI 未安装"}
-    result = run_agent_mail(["+me"], timeout=12)
-    payload = parse_cli_json(f"{result.stdout}\n{result.stderr}") or {}
+    result = run_agent_mail(["+me"], timeout=getattr(settings, "agent_mail_status_timeout_seconds", 30))
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    payload = parse_cli_json(output) or {}
     aliases = payload.get("data", {}).get("aliases") or []
     primary = next((item for item in aliases if item.get("is_primary")), aliases[0] if aliases else {})
     email = primary.get("email") or ""
     authorized = bool(result.code == 0 and email)
+    auth_state, auth_issue, requires_login = classify_agent_mail_auth_state(result.code, output)
     effective_enabled = bool(enabled or authorized)
     return {
         "enabled": effective_enabled,
@@ -463,9 +478,12 @@ def mail_status() -> dict[str, Any]:
         "email": email,
         "sendCapable": authorized,
         "provider": "agent_mail",
+        "authState": auth_state,
+        "authIssue": auth_issue,
+        "requiresLogin": requires_login,
         "autoConfirm": bool(getattr(settings, "agent_mail_auto_confirm", False)),
         "cli": cli,
-        "message": "ok" if result.code == 0 else (result.stderr or result.stdout or "Agent Mail 未授权"),
+        "message": "ok" if result.code == 0 else (output or "Agent Mail 未授权"),
     }
 
 
@@ -1010,7 +1028,11 @@ def attempt_mail_delivery(
         args.extend(["--confirmation-token", confirmation_token])
     delivery.update(status="sending", recipient=",".join(recipients), error="")
     repository._persist_item("mailDeliveries", delivery)
-    result = run_agent_mail(args, cwd=body_path.parent, timeout=45)
+    result = run_agent_mail(
+        args,
+        cwd=body_path.parent,
+        timeout=getattr(get_settings(), "agent_mail_send_timeout_seconds", 180),
+    )
     output = f"{result.stdout}\n{result.stderr}".strip()
     token, summary = extract_confirmation(output)
     payload = parse_cli_json(output) or {}
@@ -1229,9 +1251,10 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
                     execution_event(
                         "mail",
                         "done" if delivery.get("status") == "sent" else "warning",
-                        f"任务汇总邮件已生成：{delivery.get('status')}。",
+                        f"任务汇总邮件{'已发送' if delivery.get('status') == 'sent' else '未发送'}：{delivery.get('status')}；{delivery.get('error') or '无错误详情'}。",
                         deliveryId=delivery.get("id"),
                         deliveryStatus=delivery.get("status"),
+                        error=delivery.get("error"),
                     )
                 )
             else:

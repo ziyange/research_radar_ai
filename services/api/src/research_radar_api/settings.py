@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     agent_mail_enabled: bool = False
     agent_mail_cli: str = "agently-cli"
     agent_mail_auto_confirm: bool = True
+    agent_mail_status_timeout_seconds: int = 30
+    agent_mail_send_timeout_seconds: int = 180
     agent_mail_default_recipients: Annotated[list[str], NoDecode] = Field(default_factory=list)
     literature_scheduler_enabled: bool = False
     literature_storage_provider: Literal["local", "s3"] = "local"

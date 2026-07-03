@@ -26,7 +26,7 @@ import { ActivityCenter } from "./activity-center";
 import { api, defaultScan } from "./api";
 import { LibraryGraphView, makeLibraryGraph } from "./library-graph";
 import { LibraryPaperListPanel } from "./library-paper-list-panel";
-import { MailBindModal, mailStatusText, RunLogList } from "./mail-and-run-log";
+import { MailBindModal, mailBindingLabel, mailNeedsRelogin, mailStatusText, RunLogList } from "./mail-and-run-log";
 import { renderMarkdown } from "./markdown";
 import { TaskModal } from "./task-modal";
 import {
@@ -91,6 +91,7 @@ export function App() {
   const paperRowRefs = useRef({});
   const pulseTimerRef = useRef(null);
   const activityTimersRef = useRef({});
+  const mailReloginPromptedRef = useRef(false);
 
   function removeActivity(id) {
     setActivities((current) => current.filter((item) => item.id !== id));
@@ -136,6 +137,19 @@ export function App() {
       setStatus({ tone: "error", message: "本地服务未启动或不可用" });
     });
   }, []);
+
+  useEffect(() => {
+    if (!mailStatus) return;
+    if (mailStatus.authorized) {
+      mailReloginPromptedRef.current = false;
+      return;
+    }
+    if (mailNeedsRelogin(mailStatus) && !mailReloginPromptedRef.current) {
+      mailReloginPromptedRef.current = true;
+      setMailBindModal(true);
+      setStatus({ tone: "warning", message: "邮箱授权已失效，请重新登录后再发送任务邮件" });
+    }
+  }, [mailStatus]);
 
   const selectedPaper = useMemo(
     () => library.papers?.find((paper) => paper.id === selectedPaperId) || library.papers?.[0],
@@ -227,13 +241,18 @@ export function App() {
     setLoading("mail-auth");
     try {
       if (forceRebind) {
-        const logout = await api.logoutMailAuth();
-        setMailStatus(logout.mail || { authorized: false, email: "" });
+        try {
+          const logout = await api.logoutMailAuth();
+          setMailStatus(logout.mail || { authorized: false, email: "" });
+        } catch {
+          setMailStatus((current) => ({ ...(current || {}), authorized: false, requiresLogin: true }));
+        }
       }
       const data = await api.startMailAuth();
       if (data.authUrl) {
         setMailAuthUrl(data.authUrl);
-        setStatus({ tone: "running", message: "Agent Mail 授权已启动；如浏览器未自动打开，请在弹窗中手动打开授权页" });
+        window.open(data.authUrl, "_blank", "noopener,noreferrer");
+        setStatus({ tone: "running", message: "Agent Mail 授权已启动；请在打开的页面完成扫码登录" });
       }
       window.setTimeout(() => refresh().catch(() => null), 4000);
       window.setTimeout(() => refresh().catch(() => null), 12000);
@@ -635,13 +654,13 @@ export function App() {
               </div>
               <div className="task-header-actions">
                 <button
-                  className={`mail-bind-btn ${mailStatus?.authorized ? "bound" : ""}`}
+                  className={`mail-bind-btn ${mailStatus?.authorized ? "bound" : ""} ${mailNeedsRelogin(mailStatus) ? "expired" : ""}`}
                   type="button"
                   onClick={() => setMailBindModal(true)}
                   disabled={loading === "mail-auth"}
                 >
                   <Lightning size={16} weight="fill" />
-                  {mailStatus?.authorized ? `已绑定 ${mailStatus.email}` : "绑定邮箱"}
+                  {mailBindingLabel(mailStatus)}
                 </button>
                 <button className="add-task-btn" type="button" onClick={() => setTaskModal({ mode: "create" })}>
                   <Plus size={16} weight="bold" />

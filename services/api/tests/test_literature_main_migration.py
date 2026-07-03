@@ -806,6 +806,51 @@ def test_literature_agent_mail_auto_confirms_token(monkeypatch) -> None:
     assert "--confirmation-token" in calls[1]
 
 
+def test_literature_agent_mail_auto_confirm_timeout_is_visible(monkeypatch) -> None:
+    monkeypatch.setattr(
+        literature,
+        "mail_status",
+        lambda: {
+            "enabled": True,
+            "installed": True,
+            "authorized": True,
+            "email": "sender@example.com",
+            "sendCapable": True,
+            "provider": "agent_mail",
+            "cli": "agently-cli",
+            "message": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        literature,
+        "get_settings",
+        lambda: SimpleNamespace(
+            agent_mail_auto_confirm=True,
+            agent_mail_default_recipients=[],
+            agent_mail_send_timeout_seconds=180,
+        ),
+    )
+
+    def fake_run_agent_mail(args, cwd=None, timeout=45):  # noqa: ANN001, ARG001
+        if "--confirmation-token" in args:
+            assert timeout == 180
+            return literature.CliResult(124, "", "AGENT_MAIL_TIMEOUT")
+        return literature.CliResult(8, "summary: 请确认发送\nctk_timeout_confirm", "")
+
+    monkeypatch.setattr(literature, "run_agent_mail", fake_run_agent_mail)
+
+    delivery = literature.add_mail_delivery(
+        "mail_test",
+        {"id": "mail_test_auto_timeout", "title": "Agent Mail 超时测试", "abstract": "test"},
+        task={"query": "agent mail timeout"},
+        recipients=["recipient@example.com"],
+    )
+
+    assert delivery["status"] == "failed"
+    assert delivery["error"] == "AGENT_MAIL_TIMEOUT"
+    assert delivery["confirmationToken"] == "ctk_timeout_confirm"
+
+
 def test_literature_agent_mail_authorized_is_send_enabled(monkeypatch) -> None:
     monkeypatch.setattr(literature.shutil, "which", lambda cli: cli)
     monkeypatch.setattr(
@@ -834,6 +879,40 @@ def test_literature_agent_mail_authorized_is_send_enabled(monkeypatch) -> None:
     assert status["authorized"] is True
     assert status["sendCapable"] is True
     assert status["autoConfirm"] is True
+
+
+def test_literature_agent_mail_expired_status_requires_login(monkeypatch) -> None:
+    monkeypatch.setattr(literature.shutil, "which", lambda cli: cli)
+    monkeypatch.setattr(
+        literature,
+        "get_settings",
+        lambda: SimpleNamespace(
+            email_provider="mock",
+            agent_mail_enabled=False,
+            agent_mail_cli="agently-cli",
+            agent_mail_auto_confirm=True,
+            agent_mail_status_timeout_seconds=30,
+        ),
+    )
+    monkeypatch.setattr(
+        literature,
+        "run_agent_mail",
+        lambda args, cwd=None, timeout=30: literature.CliResult(
+            1,
+            "",
+            "refresh token request: context deadline exceeded\n"
+            "warning: failed to acquire refresh lock: Access is denied.\n"
+            "tip: Authorization required; follow the agently mail skill OAuth login flow.",
+        ),
+    )
+
+    status = literature.mail_status()
+
+    assert status["authorized"] is False
+    assert status["sendCapable"] is False
+    assert status["requiresLogin"] is True
+    assert status["authState"] == "refresh_failed"
+    assert "重新登录" in status["authIssue"]
 
 
 def test_literature_smtp_delivery_sends_without_confirmation(monkeypatch) -> None:

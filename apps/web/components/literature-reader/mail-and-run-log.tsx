@@ -73,6 +73,7 @@ function SourceStatusDigest({ statuses }) {
 
 export function MailBindModal({ mailStatus, authUrl, loading, onClose, onBind, onRebind, onOpenAuthUrl, onRefresh }) {
   const bound = Boolean(mailStatus?.authorized && mailStatus.email);
+  const relogin = mailNeedsRelogin(mailStatus);
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-card mail-bind-modal" onClick={(event) => event.stopPropagation()}>
@@ -83,14 +84,22 @@ export function MailBindModal({ mailStatus, authUrl, loading, onClose, onBind, o
           </button>
         </div>
         <div className="modal-body">
-          <div className={`mail-bind-state ${bound ? "bound" : ""}`}>
-            <strong>{bound ? "当前已授权账号" : "尚未绑定邮箱"}</strong>
-            <span>{bound ? `${mailStatus.email}（来自本机 Agent Mail 授权缓存）` : "绑定后，采集任务才能开启“推送邮箱”。"}</span>
+          <div className={`mail-bind-state ${bound ? "bound" : ""} ${relogin ? "expired" : ""}`}>
+            <strong>{bound ? "当前已授权账号" : relogin ? "邮箱授权已失效" : "尚未绑定邮箱"}</strong>
+            <span>
+              {bound
+                ? `${mailStatus.email}（来自本机 Agent Mail 授权缓存）`
+                : relogin
+                  ? mailStatus?.authIssue || "授权已过期或刷新失败，请重新登录邮箱。"
+                  : "绑定后，采集任务才能开启“推送邮箱”。"}
+            </span>
           </div>
           <div className="modal-section">
             <div className="modal-section-label">授权流程</div>
             <p className="modal-hint">
-              如果这里已经显示账号，说明本机 CLI 之前保存过授权。需要换账号时请点击“切换账号并重新扫码”，系统会先清除旧凭据，再打开 Agent Mail 授权页面。完成扫码后回到这里刷新状态。
+              {relogin
+                ? "请点击“重新登录邮箱”，系统会启动 Agent Mail OAuth 并自动打开授权页面。完成扫码后回到这里刷新状态。"
+                : "如果这里已经显示账号，说明本机 CLI 之前保存过授权。需要换账号时请点击“切换账号并重新扫码”，系统会先清除旧凭据，再打开 Agent Mail 授权页面。完成扫码后回到这里刷新状态。"}
             </p>
             {authUrl ? (
               <button type="button" className="btn-ghost" onClick={onOpenAuthUrl}>
@@ -103,13 +112,27 @@ export function MailBindModal({ mailStatus, authUrl, loading, onClose, onBind, o
           <button type="button" className="btn-ghost" onClick={onRefresh}>
             刷新状态
           </button>
-          <button type="button" className={bound ? "btn-ghost danger-soft" : "primary"} onClick={bound ? onRebind : onBind} disabled={loading}>
-            {loading ? "启动授权中" : bound ? "切换账号并重新扫码" : "打开授权页面"}
+          <button type="button" className={bound ? "btn-ghost danger-soft" : "primary"} onClick={bound || relogin ? onRebind : onBind} disabled={loading}>
+            {loading ? "启动授权中" : bound ? "切换账号并重新扫码" : relogin ? "重新登录邮箱" : "打开授权页面"}
           </button>
         </div>
       </div>
     </div>
   );
+}
+
+export function mailNeedsRelogin(mailStatus) {
+  return Boolean(
+    mailStatus?.requiresLogin ||
+      mailStatus?.authState === "expired" ||
+      mailStatus?.authState === "refresh_failed"
+  );
+}
+
+export function mailBindingLabel(mailStatus) {
+  if (mailStatus?.authorized && mailStatus.email) return `已绑定 ${mailStatus.email}`;
+  if (mailNeedsRelogin(mailStatus)) return "邮箱授权已失效";
+  return "绑定邮箱";
 }
 
 function ActiveRunLogCard({ log, runAnalyzeState }) {
@@ -119,6 +142,10 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
     (log.steps || []).find((step) => step.status === "running") ||
     (log.steps || []).find((step) => step.status === "pending") ||
     (log.steps || [])[0];
+  const totalSteps = (log.steps || []).length;
+  const currentStepIndex = currentStep
+    ? Math.max(1, (log.steps || []).findIndex((step) => step === currentStep) + 1)
+    : 0;
   return (
     <div className={`active-run-card ${log.status}`}>
       <div className="active-run-header">
@@ -143,6 +170,11 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
           <div>
             <strong>当前步骤</strong>
             <p>{currentStep.text}</p>
+            {totalSteps ? (
+              <small className="active-current-progress">
+                {currentStepIndex}/{totalSteps}
+              </small>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -174,6 +206,12 @@ function mailErrorText(error) {
   }
   if (text === "MAIL_RECIPIENT_REQUIRED") {
     return "缺少收件人 To，请编辑采集任务并填写有效邮箱。";
+  }
+  if (text === "AGENT_MAIL_TIMEOUT") {
+    return "Agent Mail 发送超时。通常是授权刷新、网络连接或附件上传耗时过长，请刷新邮箱绑定状态后重试。";
+  }
+  if (/refresh lock|authorization required|context deadline exceeded/i.test(text)) {
+    return "Agent Mail 授权刷新失败。请重新绑定邮箱，或检查本机 Agent Mail CLI 是否被其他进程占用。";
   }
   if (/confirmation token/i.test(text) && /expired|invalid/i.test(text)) {
     return "确认令牌已过期或无效，请重新生成确认。";
@@ -311,6 +349,7 @@ export function RunLogList({
   function toggle(id) {
     setExpandedRunIds((current) => ({ ...current, [id]: !current[id] }));
   }
+  const relogin = mailNeedsRelogin(mailStatus);
 
   return (
     <div className="paper-inspector">
@@ -319,14 +358,20 @@ export function RunLogList({
         <h2>任务执行日志</h2>
         <p>点击任务执行后，这里会先显示当前任务进度；完成后回填真实检索式、来源状态、去重与入库文献。</p>
       </div>
-      <div className={`mail-status-card ${mailStatus?.authorized ? "bound" : ""}`}>
+      <div className={`mail-status-card ${mailStatus?.authorized ? "bound" : ""} ${relogin ? "expired" : ""}`}>
         <div>
-          <strong>{mailStatus?.authorized ? "邮箱已绑定" : "邮箱未绑定"}</strong>
-          <span>{mailStatus?.authorized ? mailStatus.email : "绑定后才能在采集任务中开启任务汇总推送。"}</span>
+          <strong>{mailStatus?.authorized ? "邮箱已绑定" : relogin ? "邮箱授权已失效" : "邮箱未绑定"}</strong>
+          <span>
+            {mailStatus?.authorized
+              ? mailStatus.email
+              : relogin
+                ? mailStatus?.authIssue || "请重新登录邮箱后再发送任务汇总邮件。"
+                : "绑定后才能在采集任务中开启任务汇总推送。"}
+          </span>
         </div>
         {!mailStatus?.authorized ? (
           <button type="button" onClick={onBindMail} disabled={loading === "mail-auth"}>
-            绑定邮箱
+            {relogin ? "重新登录" : "绑定邮箱"}
           </button>
         ) : null}
       </div>
