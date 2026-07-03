@@ -2796,6 +2796,24 @@ input {
   border-color: #fed7aa;
 }
 
+.mail-auth-url-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 11px;
+  color: #50645f;
+  background: #f8fbf9;
+  border: 1px dashed #d3e0da;
+  border-radius: 9px;
+}
+
+.mail-auth-url-fallback span {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* ===== 执行日志列表 ===== */
 .active-run-card {
   display: flex;

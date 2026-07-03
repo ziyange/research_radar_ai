@@ -86,7 +86,6 @@ export function App() {
   const [mailAuthUrl, setMailAuthUrl] = useState("");
   const [mailAuthSessionId, setMailAuthSessionId] = useState("");
   const [mailAuthSession, setMailAuthSession] = useState(null);
-  const [mailAuthWindowOpened, setMailAuthWindowOpened] = useState(false);
   const [expandedRunIds, setExpandedRunIds] = useState({});
   const [runAnalyzeState, setRunAnalyzeState] = useState({});
   const [activeRunLog, setActiveRunLog] = useState(null);
@@ -95,8 +94,6 @@ export function App() {
   const pulseTimerRef = useRef(null);
   const activityTimersRef = useRef({});
   const mailReloginPromptedRef = useRef(false);
-  const mailAuthWindowRef = useRef(null);
-  const lastMailAuthUrlRef = useRef("");
 
   function removeActivity(id) {
     setActivities((current) => current.filter((item) => item.id !== id));
@@ -168,22 +165,13 @@ export function App() {
         if (data.mail) setMailStatus(data.mail);
         if (session?.status === "authorized") {
           setMailStatus(data.mail || { authorized: true, email: session.email || "" });
-          try {
-            mailAuthWindowRef.current?.close();
-          } catch {
-            // The auth window can already be closed or cross-origin.
-          }
-          mailAuthWindowRef.current = null;
-          lastMailAuthUrlRef.current = "";
           setMailBindModal(false);
           setMailAuthSessionId("");
           setMailAuthSession(null);
           setMailAuthUrl("");
-          setMailAuthWindowOpened(false);
           setStatus({ tone: "success", message: `邮箱绑定成功${session.email ? `：${session.email}` : ""}` });
         } else if (session?.status === "failed" || session?.status === "timeout") {
           setMailAuthSessionId("");
-          lastMailAuthUrlRef.current = "";
           setStatus({ tone: "error", message: session.error || "邮箱授权失败，请重新登录" });
         }
       } catch (err) {
@@ -286,8 +274,7 @@ export function App() {
   async function bindAgentMail(forceRebind = false) {
     if (mailAuthSessionId && mailAuthUrl) {
       setMailBindModal(true);
-      openMailAuthWindow(mailAuthUrl);
-      setStatus({ tone: "warning", message: "邮箱授权窗口已打开，请先完成当前登录" });
+      setStatus({ tone: "warning", message: "邮箱授权流程已启动，请先完成当前登录" });
       return;
     }
     setError("");
@@ -306,8 +293,7 @@ export function App() {
         setMailAuthUrl(data.authUrl);
         setMailAuthSessionId(data.sessionId || "");
         setMailAuthSession(data.session || null);
-        openMailAuthWindow(data.authUrl);
-        setStatus({ tone: "running", message: "Agent Mail 授权已启动；请在打开的页面完成扫码登录" });
+        setStatus({ tone: "running", message: "Agent Mail 授权已启动；请在自动打开的页面完成扫码登录" });
       }
     } catch (err) {
       setError(err.message);
@@ -317,22 +303,14 @@ export function App() {
     }
   }
 
-  function openMailAuthWindow(url = mailAuthUrl) {
-    if (!url) return false;
-    if (
-      mailAuthWindowRef.current &&
-      !mailAuthWindowRef.current.closed &&
-      lastMailAuthUrlRef.current === url
-    ) {
-      mailAuthWindowRef.current.focus();
-      setMailAuthWindowOpened(true);
-      return true;
+  async function copyMailAuthUrl() {
+    if (!mailAuthUrl) return;
+    try {
+      await navigator.clipboard.writeText(mailAuthUrl);
+      setStatus({ tone: "success", message: "授权链接已复制" });
+    } catch {
+      setStatus({ tone: "warning", message: "复制失败，请手动选中授权链接复制" });
     }
-    const popup = window.open(url, "research-radar-agent-mail-auth", "width=960,height=760");
-    mailAuthWindowRef.current = popup;
-    lastMailAuthUrlRef.current = url;
-    setMailAuthWindowOpened(Boolean(popup));
-    return Boolean(popup);
   }
 
   async function refreshMailStatus() {
@@ -1083,13 +1061,12 @@ export function App() {
           mailStatus={mailStatus}
           authUrl={mailAuthUrl}
           authSession={mailAuthSession}
-          authWindowOpened={mailAuthWindowOpened}
           loading={loading === "mail-auth"}
           refreshLoading={loading === "mail-refresh"}
           onClose={() => setMailBindModal(false)}
           onBind={() => bindAgentMail(false)}
           onRebind={() => bindAgentMail(true)}
-          onOpenAuthUrl={() => openMailAuthWindow()}
+          onCopyAuthUrl={copyMailAuthUrl}
           onRefresh={refreshMailStatus}
         />
       ) : null}

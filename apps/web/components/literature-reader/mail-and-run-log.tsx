@@ -75,13 +75,12 @@ export function MailBindModal({
   mailStatus,
   authUrl,
   authSession,
-  authWindowOpened,
   loading,
   refreshLoading,
   onClose,
   onBind,
   onRebind,
-  onOpenAuthUrl,
+  onCopyAuthUrl,
   onRefresh,
 }) {
   const bound = Boolean(mailStatus?.authorized && mailStatus.email);
@@ -110,13 +109,16 @@ export function MailBindModal({
             <div className="modal-section-label">授权流程</div>
             <p className="modal-hint">
               {relogin
-                ? "请点击“重新登录邮箱”，系统会启动 Agent Mail OAuth 并自动打开一个授权页面。完成扫码后这里会自动回传绑定状态。"
-                : "如果这里已经显示账号，说明本机 CLI 之前保存过授权。需要换账号时请点击“切换账号并重新扫码”，系统会先清除旧凭据，再打开一个 Agent Mail 授权页面。完成扫码后这里会自动回传绑定状态。"}
+                ? "请点击“重新登录邮箱”，系统会启动 Agent Mail OAuth。CLI 会自动打开一个授权页面，完成扫码后这里会自动回传绑定状态。"
+                : "如果这里已经显示账号，说明本机 CLI 之前保存过授权。需要换账号时请点击“切换账号并重新扫码”，系统会先清除旧凭据，再启动 Agent Mail OAuth。完成扫码后这里会自动回传绑定状态。"}
             </p>
             {authUrl ? (
-              <button type="button" className="btn-ghost" onClick={onOpenAuthUrl}>
-                {authWindowOpened ? "聚焦授权窗口" : "打开授权窗口"}
-              </button>
+              <div className="mail-auth-url-fallback">
+                <span>如果没有自动打开授权页面，可以复制链接到已有浏览器地址栏。</span>
+                <button type="button" className="btn-ghost" onClick={onCopyAuthUrl}>
+                  复制授权链接
+                </button>
+              </div>
             ) : null}
             {authSession ? (
               <div className={`mail-auth-session ${authSession.status || ""}`}>
