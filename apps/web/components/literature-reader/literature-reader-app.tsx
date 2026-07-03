@@ -12,6 +12,7 @@ import {
   Database,
   DownloadSimple,
   FileText,
+  GearSix,
   Lightning,
   LinkSimple,
   MagnifyingGlass,
@@ -28,6 +29,7 @@ import { LibraryGraphView, makeLibraryGraph } from "./library-graph";
 import { LibraryPaperListPanel } from "./library-paper-list-panel";
 import { MailBindModal, mailBindingLabel, mailNeedsRelogin, mailStatusText, RunLogList } from "./mail-and-run-log";
 import { renderMarkdown } from "./markdown";
+import { SettingsModal } from "./settings-modal";
 import { TaskModal } from "./task-modal";
 import {
   buildLibraryGroups,
@@ -49,13 +51,19 @@ function taskMailPushReady(task) {
   return Boolean(task?.notifyAfterRun && recipients.length && !invalidEmails([...recipients, ...cc, ...bcc]).length);
 }
 
-function executionEventsToSteps(events, fallbackSteps = []) {
+function executionEventsToSteps(events, fallbackSteps = [], complete = false) {
   if (!events?.length) return fallbackSteps;
-  return events.map((event, index) => ({
-    key: event.id || `${event.stage || "event"}-${index}`,
-    status: event.status || "done",
-    text: event.message || `${event.stage || "步骤"} 已完成`,
-  }));
+  return events.map((event, index) => {
+    let status = event.status || "done";
+    if (status === "running" && (complete || index < events.length - 1)) {
+      status = "done";
+    }
+    return {
+      key: event.id || `${event.stage || "event"}-${index}`,
+      status,
+      text: event.message || `${event.stage || "步骤"} 已完成`,
+    };
+  });
 }
 
 export function App() {
@@ -83,6 +91,8 @@ export function App() {
   const [error, setError] = useState("");
   const [taskModal, setTaskModal] = useState(null);
   const [mailBindModal, setMailBindModal] = useState(false);
+  const [settingsModal, setSettingsModal] = useState(false);
+  const [runtimeConfig, setRuntimeConfig] = useState(null);
   const [mailAuthUrl, setMailAuthUrl] = useState("");
   const [mailAuthSessionId, setMailAuthSessionId] = useState("");
   const [mailAuthSession, setMailAuthSession] = useState(null);
@@ -133,11 +143,42 @@ export function App() {
     setSelectedPaperId((current) => current || libraryData.papers?.[0]?.id || null);
   }
 
+  async function openSettings() {
+    setLoading("config-load");
+    try {
+      const data = await api.getConfig();
+      setRuntimeConfig(data);
+      setSettingsModal(true);
+    } catch (err) {
+      setError(err.message);
+      setStatus({ tone: "error", message: err.message });
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function saveSettings(values) {
+    setLoading("config-save");
+    try {
+      const data = await api.updateConfig(values);
+      setRuntimeConfig(data);
+      setSettingsModal(false);
+      setStatus({ tone: "success", message: "运行配置已保存，部分配置重启服务后生效" });
+      refresh().catch(() => null);
+    } catch (err) {
+      setError(err.message);
+      setStatus({ tone: "error", message: err.message });
+    } finally {
+      setLoading(null);
+    }
+  }
+
   useEffect(() => {
     refresh().catch((err) => {
       setError(err.message);
       setStatus({ tone: "error", message: "本地服务未启动或不可用" });
     });
+    return undefined;
   }, []);
 
   useEffect(() => {
@@ -413,6 +454,45 @@ export function App() {
     };
   }
 
+  function buildCompletedRunLog(task, run) {
+    const base = buildRunningLog(task);
+    const steps = executionEventsToSteps(run?.executionEvents || [], base.steps, true).map((step) => ({
+      ...step,
+      status: step.status === "running" || step.status === "pending" ? "done" : step.status,
+    }));
+    return {
+      ...base,
+      id: run?.id || base.id,
+      runId: run?.id || "",
+      status: run?.savedCount > 0 ? "done" : run?.targetMet === false ? "warning" : "done",
+      startedAt: run?.createdAt || base.startedAt,
+      steps,
+      targetMet: run?.targetMet,
+      exhaustedReason: run?.exhaustedReason || "",
+      errorMessage: run?._errorMessage || "",
+    };
+  }
+
+  function buildRunJobLog(task, job) {
+    const base = buildRunningLog(task);
+    const steps = executionEventsToSteps(job?.events || [], base.steps, job?.status !== "running");
+    return {
+      ...base,
+      id: job?.id || base.id,
+      runId: job?.run?.id || "",
+      status: job?.status === "failed" ? "failed" : job?.status === "running" ? "running" : "done",
+      startedAt: job?.createdAt || base.startedAt,
+      steps,
+      errorMessage: job?.error || "",
+      targetMet: job?.run?.targetMet,
+      exhaustedReason: job?.run?.exhaustedReason || "",
+    };
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
   async function runScan(task) {
     if (!task || runningTaskIds[task.id]) return;
     const pushReady = taskMailPushReady(task);
@@ -423,11 +503,24 @@ export function App() {
     setRunningTaskIds((current) => ({ ...current, [task.id]: true }));
     setStatus({ tone: "running", message: `正在执行：${short(task.query, 42)}` });
     try {
-      const data = await api.runTask(task.id);
+      const started = await api.runTaskAsync(task.id);
+      setActiveRunLog(buildRunJobLog(effectiveTask, started.job));
+      let job = started.job;
+      for (;;) {
+        await wait(1000);
+        const progress = await api.getRunJob(job.id);
+        job = progress.job;
+        setActiveRunLog(buildRunJobLog(effectiveTask, job));
+        if (job.status !== "running") break;
+      }
+      if (job.status === "failed") {
+        throw new Error(job.error || "执行任务失败");
+      }
+      const data = job.result;
       setLibrary(data.library);
       if (data.tasks) setTasks(data.tasks);
       setSelectedPaperId((current) => current || data.library?.papers?.[0]?.id || null);
-      setActiveRunLog(null);
+      setActiveRunLog(buildCompletedRunLog(effectiveTask, data.run));
       setExpandedRunIds((current) => ({ ...current, [data.run.id]: true }));
       setStatus({
         tone: data.run.savedCount > 0 ? "success" : "warning",
@@ -458,7 +551,11 @@ export function App() {
         targetMet: false,
         exhaustedReason: err.message,
       };
-      setActiveRunLog(null);
+      setActiveRunLog({
+        ...buildCompletedRunLog(effectiveTask, failed),
+        status: "failed",
+        errorMessage: err.message,
+      });
       setLibrary((current) => ({
         ...current,
         scanRuns: [failed, ...(current.scanRuns || [])].slice(0, 30),
@@ -695,6 +792,11 @@ export function App() {
             <small>{library.papers?.length || 0}</small>
           </button>
         </section>
+
+        <button className="sidebar-settings-button" type="button" onClick={openSettings} disabled={loading === "config-load"}>
+          <GearSix size={17} />
+          <span>{loading === "config-load" ? "读取设置" : "设置"}</span>
+        </button>
       </aside>
 
       <section className="reader-panel">
@@ -1068,6 +1170,14 @@ export function App() {
           onRebind={() => bindAgentMail(true)}
           onCopyAuthUrl={copyMailAuthUrl}
           onRefresh={refreshMailStatus}
+        />
+      ) : null}
+      {settingsModal ? (
+        <SettingsModal
+          config={runtimeConfig}
+          loading={loading === "config-save"}
+          onClose={() => setSettingsModal(false)}
+          onSave={saveSettings}
         />
       ) : null}
       <ActivityCenter

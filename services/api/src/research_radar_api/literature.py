@@ -11,11 +11,12 @@ import subprocess
 import threading
 import time
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -47,6 +48,33 @@ router = APIRouter(prefix="/api/v1/literature", tags=["literature"])
 MAIL_AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
 MAIL_AUTH_SESSION_TTL_SECONDS = 300
 MAIL_AUTH_LOCK = threading.Lock()
+RUN_JOBS: dict[str, dict[str, Any]] = {}
+RUN_JOB_TTL_SECONDS = 60 * 60
+SCHEDULER_TASK: asyncio.Task[Any] | None = None
+SCHEDULER_STOP_EVENT: asyncio.Event | None = None
+
+CONFIG_FIELDS: list[dict[str, Any]] = [
+    {"key": "AI_PROVIDER", "label": "AI 提供方", "description": "mock 为本地模拟；openai 用于阿里云百炼/OpenAI 兼容接口。", "group": "AI 模型", "type": "select", "options": ["mock", "openai"]},
+    {"key": "OPENAI_BASE_URL", "label": "大模型接口地址", "description": "OpenAI-compatible base URL，例如阿里云百炼 compatible-mode/v1。", "group": "AI 模型", "type": "text"},
+    {"key": "OPENAI_MODEL", "label": "模型名称", "description": "例如 qwen3.6-plus。", "group": "AI 模型", "type": "text"},
+    {"key": "OPENAI_API_KEY", "label": "模型 API Key", "description": "用于调用大模型；读取时只显示是否已填写。", "group": "AI 模型", "type": "secret", "secret": True},
+    {"key": "AI_REQUEST_TIMEOUT_SECONDS", "label": "AI 请求超时秒数", "description": "单次 AI 请求最长等待时间。", "group": "AI 模型", "type": "number"},
+    {"key": "OPENALEX_EMAIL", "label": "OpenAlex 邮箱", "description": "建议填写联系邮箱，提高 OpenAlex 请求稳定性。", "group": "检索数据源", "type": "text"},
+    {"key": "AGENT_SOURCE_TIMEOUT_SECONDS", "label": "数据源请求超时秒数", "description": "OpenAlex/Crossref 单次请求最长等待时间。", "group": "检索数据源", "type": "number"},
+    {"key": "LITERATURE_SCHEDULER_ENABLED", "label": "每日自动任务", "description": "开启后 FastAPI 服务运行期间会按任务设置每日执行。", "group": "自动化", "type": "boolean"},
+    {"key": "LITERATURE_STORAGE_ROOT", "label": "本地文献存储目录", "description": "PDF、Markdown、邮件附件和本地实体存储目录。", "group": "自动化", "type": "text"},
+    {"key": "EMAIL_PROVIDER", "label": "邮件发送方式", "description": "agent_mail 使用 Agent Mail CLI；smtp 使用 SMTP 自动发送。", "group": "邮箱推送 / 通用", "type": "select", "options": ["mock", "smtp", "agent_mail"]},
+    {"key": "AGENT_MAIL_ENABLED", "label": "启用 Agent Mail", "description": "开启后可绑定 Agent Mail 账号进行邮件发送。", "group": "邮箱推送 / Agent Mail", "type": "boolean"},
+    {"key": "AGENT_MAIL_CLI", "label": "Agent Mail CLI", "description": "agently-cli 可执行文件名或路径。", "group": "邮箱推送 / Agent Mail", "type": "text"},
+    {"key": "AGENT_MAIL_AUTO_CONFIRM", "label": "自动提交确认令牌", "description": "任务邮件发送时自动提交 CLI 返回的 confirmation-token。", "group": "邮箱推送 / Agent Mail", "type": "boolean"},
+    {"key": "AGENT_MAIL_DEFAULT_RECIPIENTS", "label": "默认收件人", "description": "逗号分隔；任务未设置收件人时作为兜底。", "group": "邮箱推送 / Agent Mail", "type": "text"},
+    {"key": "EMAIL_FROM", "label": "发件人显示", "description": "SMTP 发件人，例如 Research Radar AI <name@example.com>。", "group": "邮箱推送 / SMTP", "type": "text"},
+    {"key": "SMTP_HOST", "label": "SMTP 服务器", "description": "使用 SMTP 自动发送时填写。", "group": "邮箱推送 / SMTP", "type": "text"},
+    {"key": "SMTP_PORT", "label": "SMTP 端口", "description": "通常为 587。", "group": "邮箱推送 / SMTP", "type": "number"},
+    {"key": "SMTP_USERNAME", "label": "SMTP 用户名", "description": "SMTP 登录用户名。", "group": "邮箱推送 / SMTP", "type": "text"},
+    {"key": "SMTP_PASSWORD", "label": "SMTP 密码/授权码", "description": "SMTP 密码或邮箱授权码；读取时只显示是否已填写。", "group": "邮箱推送 / SMTP", "type": "secret", "secret": True},
+    {"key": "SMTP_USE_TLS", "label": "SMTP TLS", "description": "是否使用 STARTTLS。", "group": "邮箱推送 / SMTP", "type": "boolean"},
+]
 
 
 def visible_tasks() -> list[dict[str, Any]]:
@@ -55,6 +83,96 @@ def visible_tasks() -> list[dict[str, Any]]:
         for task in repository.tasks
         if not is_test_artifact("literature_tasks", task)
     ]
+
+
+def env_path() -> Path:
+    return ROOT_DIR / ".env"
+
+
+def env_example_path() -> Path:
+    return ROOT_DIR / ".env.example"
+
+
+def ensure_env_file() -> Path:
+    target = env_path()
+    if target.exists():
+        return target
+    example = env_example_path()
+    if example.exists():
+        target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        target.write_text("", encoding="utf-8")
+    return target
+
+
+def read_env_values() -> dict[str, str]:
+    target = ensure_env_file()
+    values: dict[str, str] = {}
+    for line in target.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def format_env_value(value: object) -> str:
+    text = str(value if value is not None else "").replace("\r", " ").replace("\n", " ").strip()
+    if any(char.isspace() for char in text) or "#" in text:
+        escaped = text.replace('"', '\\"')
+        return f'"{escaped}"'
+    return text
+
+
+def update_env_values(updates: dict[str, object]) -> dict[str, str]:
+    allowed = {field["key"] for field in CONFIG_FIELDS}
+    cleaned = {
+        key: value
+        for key, value in updates.items()
+        if key in allowed and value is not None and not (next((field for field in CONFIG_FIELDS if field["key"] == key), {}).get("secret") and value == "")
+    }
+    target = ensure_env_file()
+    lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
+    seen: set[str] = set()
+    output: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            output.append(line)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in cleaned:
+            output.append(f"{key}={format_env_value(cleaned[key])}")
+            seen.add(key)
+        else:
+            output.append(line)
+    for key, value in cleaned.items():
+        if key not in seen:
+            output.append(f"{key}={format_env_value(value)}")
+    target.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    get_settings.cache_clear()
+    return read_env_values()
+
+
+def public_config_payload() -> dict[str, Any]:
+    values = read_env_values()
+    fields = []
+    for field in CONFIG_FIELDS:
+        key = field["key"]
+        value = values.get(key, "")
+        fields.append(
+            {
+                **field,
+                "value": "" if field.get("secret") else value,
+                "hasValue": bool(value),
+            }
+        )
+    return {
+        "envPath": str(env_path()),
+        "fields": fields,
+        "updatedAt": now_iso(),
+    }
 
 
 def cleanup_mail_auth_sessions() -> None:
@@ -140,6 +258,138 @@ def execution_event(stage: str, status: str, message: str, **fields: Any) -> dic
     }
 
 
+EventSink = Callable[[dict[str, Any]], None]
+
+
+def emit_event(
+    events: list[dict[str, Any]],
+    event_sink: EventSink | None,
+    stage: str,
+    status: str,
+    message: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    event = execution_event(stage, status, message, **fields)
+    events.append(event)
+    if event_sink:
+        event_sink(event)
+    return event
+
+
+def parse_daily_time(value: str) -> tuple[int, int]:
+    try:
+        hour_text, minute_text = str(value or "09:00").split(":", 1)
+        hour = max(0, min(23, int(hour_text)))
+        minute = max(0, min(59, int(minute_text)))
+        return hour, minute
+    except (ValueError, TypeError):
+        return (9, 0)
+
+
+def task_timezone(task: dict[str, Any]) -> ZoneInfo:
+    try:
+        return ZoneInfo(str(task.get("dailyTimezone") or "Asia/Shanghai"))
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("Asia/Shanghai")
+
+
+def next_daily_run_iso(task: dict[str, Any], now: datetime | None = None) -> str:
+    if not task.get("dailyEnabled"):
+        return ""
+    base = now or datetime.now(timezone.utc)
+    tz = task_timezone(task)
+    local_now = base.astimezone(tz)
+    hour, minute = parse_daily_time(str(task.get("dailyTime") or "09:00"))
+    next_local = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if local_now >= next_local:
+        next_local = next_local + timedelta(days=1)
+    return next_local.astimezone(timezone.utc).isoformat()
+
+
+def task_due_for_daily_run(task: dict[str, Any], now: datetime | None = None) -> bool:
+    if not task.get("dailyEnabled"):
+        return False
+    base = now or datetime.now(timezone.utc)
+    tz = task_timezone(task)
+    local_now = base.astimezone(tz)
+    hour, minute = parse_daily_time(str(task.get("dailyTime") or "09:00"))
+    scheduled = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    run_date = local_now.date().isoformat()
+    return local_now >= scheduled and task.get("lastScheduledRunDate") != run_date and task.get("lastRunStatus") != "running"
+
+
+async def run_due_scheduled_tasks_once(now: datetime | None = None) -> list[dict[str, Any]]:
+    settings = get_settings()
+    if not settings.literature_scheduler_enabled:
+        return []
+    base = now or datetime.now(timezone.utc)
+    results: list[dict[str, Any]] = []
+    for task in list(repository.tasks):
+        if not task_due_for_daily_run(task, base):
+            if task.get("dailyEnabled"):
+                next_at = next_daily_run_iso(task, base)
+                if task.get("nextScheduledRunAt") != next_at:
+                    task["nextScheduledRunAt"] = next_at
+                    repository._persist_item("tasks", task)
+            continue
+        tz = task_timezone(task)
+        run_date = base.astimezone(tz).date().isoformat()
+        task["lastScheduledRunDate"] = run_date
+        task["lastScheduledRunAt"] = now_iso()
+        task["nextScheduledRunAt"] = next_daily_run_iso(task, base)
+        repository._persist_item("tasks", task)
+        try:
+            result = await run_task(str(task["id"]), {"trigger": "scheduled"})
+            results.append({"taskId": task["id"], "status": "succeeded", "runId": result.get("run", {}).get("id")})
+        except Exception as exc:  # noqa: BLE001
+            task["lastRunStatus"] = "failed"
+            task["lastRunError"] = str(exc)
+            task["lastRunFinishedAt"] = now_iso()
+            repository._persist_item("tasks", task)
+            results.append({"taskId": task["id"], "status": "failed", "error": str(exc)})
+    return results
+
+
+async def literature_scheduler_loop() -> None:
+    global SCHEDULER_STOP_EVENT
+    SCHEDULER_STOP_EVENT = asyncio.Event()
+    while not SCHEDULER_STOP_EVENT.is_set():
+        try:
+            await run_due_scheduled_tasks_once()
+        except Exception:
+            # Scheduler failures are reflected in task state where possible; the
+            # loop must stay alive for later daily runs.
+            pass
+        try:
+            await asyncio.wait_for(SCHEDULER_STOP_EVENT.wait(), timeout=60)
+        except TimeoutError:
+            continue
+
+
+@router.on_event("startup")
+async def start_literature_scheduler() -> None:
+    global SCHEDULER_TASK
+    if SCHEDULER_TASK and not SCHEDULER_TASK.done():
+        return
+    if not get_settings().literature_scheduler_enabled:
+        return
+    SCHEDULER_TASK = asyncio.create_task(literature_scheduler_loop())
+
+
+@router.on_event("shutdown")
+async def stop_literature_scheduler() -> None:
+    global SCHEDULER_TASK, SCHEDULER_STOP_EVENT
+    if SCHEDULER_STOP_EVENT:
+        SCHEDULER_STOP_EVENT.set()
+    if SCHEDULER_TASK:
+        try:
+            await asyncio.wait_for(SCHEDULER_TASK, timeout=2)
+        except (TimeoutError, asyncio.CancelledError):
+            SCHEDULER_TASK.cancel()
+    SCHEDULER_TASK = None
+    SCHEDULER_STOP_EVENT = None
+
+
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
@@ -221,7 +471,12 @@ def summarize_source_statuses(statuses: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trigger: str = "manual") -> dict[str, Any]:
+async def perform_scan(
+    payload: dict[str, Any],
+    task_id: str | None = None,
+    trigger: str = "manual",
+    event_sink: EventSink | None = None,
+) -> dict[str, Any]:
     query = str(payload.get("query") or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail={"code": "QUERY_REQUIRED", "message": "请输入研究方向"})
@@ -232,29 +487,32 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
     query_plan = await expand_queries(query)
     fetch_limit = max(120, count * 30)
     source_statuses: list[dict[str, Any]] = []
-    execution_events: list[dict[str, Any]] = [
-        execution_event(
-            "prepare",
-            "done",
-            f"读取任务参数：方向「{query}」，目标 {count} 篇，年份 {year_from or '不限'}，评分≥{min_score:g}。",
-        ),
-        execution_event(
-            "plan",
-            "done",
-            f"生成 {len(query_plan)} 个检索式：{', '.join(item['query'] for item in query_plan[:4])}。",
-        ),
-    ]
+    execution_events: list[dict[str, Any]] = []
+    emit_event(
+        execution_events,
+        event_sink,
+        "prepare",
+        "done",
+        f"读取任务参数：方向「{query}」，目标 {count} 篇，年份 {year_from or '不限'}，评分≥{min_score:g}。",
+    )
+    emit_event(
+        execution_events,
+        event_sink,
+        "plan",
+        "done",
+        f"生成 {len(query_plan)} 个检索式：{', '.join(item['query'] for item in query_plan[:4])}。",
+    )
     semaphores = {"openalex": asyncio.Semaphore(2), "crossref": asyncio.Semaphore(1)}
 
     async def fetch_job(source: str, planned: dict[str, str]) -> list[dict[str, Any]]:
-        execution_events.append(
-            execution_event(
-                "source",
-                "running",
-                f"连接 {source}，查询关键词「{planned['query']}」。",
-                source=source,
-                query=planned["query"],
-            )
+        emit_event(
+            execution_events,
+            event_sink,
+            "source",
+            "running",
+            f"连接 {source}，查询关键词「{planned['query']}」。",
+            source=source,
+            query=planned["query"],
         )
         try:
             async with semaphores[source]:
@@ -272,15 +530,15 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
                     "count": len(items),
                 }
             )
-            execution_events.append(
-                execution_event(
-                    "source",
-                    "done",
-                    f"{source} / 「{planned['query']}」返回 {len(items)} 条开放元数据。",
-                    source=source,
-                    query=planned["query"],
-                    count=len(items),
-                )
+            emit_event(
+                execution_events,
+                event_sink,
+                "source",
+                "done",
+                f"{source} / 「{planned['query']}」返回 {len(items)} 条开放元数据。",
+                source=source,
+                query=planned["query"],
+                count=len(items),
             )
             for index, paper in enumerate(items, start=1):
                 paper["matchedQuery"] = planned["query"]
@@ -305,16 +563,16 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
                     "errorType": error_type,
                 }
             )
-            execution_events.append(
-                execution_event(
-                    "source",
-                    "failed",
-                    f"{source} / 「{planned['query']}」检索失败：{error_type}。",
-                    source=source,
-                    query=planned["query"],
-                    error=error_text,
-                    errorType=error_type,
-                )
+            emit_event(
+                execution_events,
+                event_sink,
+                "source",
+                "failed",
+                f"{source} / 「{planned['query']}」检索失败：{error_type}。",
+                source=source,
+                query=planned["query"],
+                error=error_text,
+                errorType=error_type,
             )
             return []
 
@@ -333,52 +591,56 @@ async def perform_scan(payload: dict[str, Any], task_id: str | None = None, trig
         and (paper.get("rawScore") or 0) >= min_score
         and any(relevant_enough(paper, planned["query"]) for planned in query_plan)
     ]
-    execution_events.append(
-        execution_event(
-            "filter",
-            "done",
-            f"完成评分筛选：满足年份、评分和相关性条件的候选 {len(candidates)} 篇。",
-            count=len(candidates),
-        )
+    emit_event(
+        execution_events,
+        event_sink,
+        "filter",
+        "done",
+        f"完成评分筛选：满足年份、评分和相关性条件的候选 {len(candidates)} 篇。",
+        count=len(candidates),
     )
     unique, duplicates = dedupe(repository.library["papers"], candidates)
-    execution_events.append(
-        execution_event(
-            "dedupe",
-            "done",
-            f"完成跨源/本地去重：新文献 {len(unique)} 篇，重复 {len(duplicates)} 篇。",
-            uniqueCount=len(unique),
-            duplicateCount=len(duplicates),
-        )
+    emit_event(
+        execution_events,
+        event_sink,
+        "dedupe",
+        "done",
+        f"完成跨源/本地去重：新文献 {len(unique)} 篇，重复 {len(duplicates)} 篇。",
+        uniqueCount=len(unique),
+        duplicateCount=len(duplicates),
     )
     selected = sorted(unique, key=lambda item: item.get("rawScore") or 0, reverse=True)[:count]
     saved = []
     for paper in selected:
-        execution_events.append(
-            execution_event(
-                "save",
-                "running",
-                f"保存文献：{paper.get('title') or paper.get('doi') or paper.get('id')}。",
-                paperId=paper.get("id"),
-                title=paper.get("title"),
-            )
+        emit_event(
+            execution_events,
+            event_sink,
+            "save",
+            "running",
+            f"保存文献：{paper.get('title') or paper.get('doi') or paper.get('id')}。",
+            paperId=paper.get("id"),
+            title=paper.get("title"),
         )
         enriched = await save_paper_asset(paper, payload.get("downloadOpenPdf") is not False)
         saved.append(enriched)
         fulltext_status = enriched.get("fullTextStatus") or ("ready" if enriched.get("localFullTextPath") else "metadata_only")
-        execution_events.append(
-            execution_event(
-                "save",
-                "done",
-                f"已入库：{enriched.get('title') or enriched.get('doi')}；全文状态：{fulltext_status}。",
-                paperId=enriched.get("id"),
-                title=enriched.get("title"),
-                fullTextStatus=fulltext_status,
-            )
+        emit_event(
+            execution_events,
+            event_sink,
+            "save",
+            "done",
+            f"已入库：{enriched.get('title') or enriched.get('doi')}；全文状态：{fulltext_status}。",
+            paperId=enriched.get("id"),
+            title=enriched.get("title"),
+            fullTextStatus=fulltext_status,
         )
     if not saved:
-        execution_events.append(
-            execution_event("save", "skipped", "没有新的可入库文献，跳过保存、全文获取、AI 分析和任务邮件。")
+        emit_event(
+            execution_events,
+            event_sink,
+            "save",
+            "skipped",
+            "没有新的可入库文献，跳过保存、全文获取、AI 分析和任务邮件。",
         )
     run = {
         "id": f"scan_{uuid4()}",
@@ -510,6 +772,55 @@ def confirmation_token_invalid(output: str) -> bool:
     return "confirmation token" in message and ("expired" in message or "invalid" in message)
 
 
+def cli_output(result: CliResult) -> str:
+    return f"{result.stdout}\n{result.stderr}".strip()
+
+
+def agent_mail_error_message(output: str) -> str:
+    payload = parse_cli_json(output) or {}
+    error = payload.get("error") or payload.get("data", {}).get("error") or {}
+    message = error.get("message") if isinstance(error, dict) else ""
+    return str(message or payload.get("message") or output or "").strip()
+
+
+def agent_mail_transient_failure(code: int, output: str) -> bool:
+    message = agent_mail_error_message(output).lower()
+    return (
+        code in {1, 4, 7}
+        and (
+            "eof" in message
+            or "api_error" in message
+            or "server error" in message
+            or "network" in message
+            or "connection reset" in message
+            or "resolve alias" in message
+            or "/v1/me" in message
+        )
+    )
+
+
+def agent_mail_retryable_error_summary(output: str) -> str:
+    message = agent_mail_error_message(output)
+    lowered = message.lower()
+    if "resolve alias" in lowered and ("/v1/me" in lowered or "eof" in lowered):
+        return "Agent Mail 服务暂时无法解析已授权发件邮箱（/v1/me EOF）。邮箱授权不一定失效，请稍后重试发送。"
+    if "eof" in lowered:
+        return "Agent Mail 服务连接中断（EOF）。请稍后重试发送。"
+    return message or "Agent Mail 服务临时不可用，请稍后重试。"
+
+
+def run_agent_mail_send_with_retry(args: list[str], cwd: Path, timeout: int) -> CliResult:
+    result = run_agent_mail(args, cwd=cwd, timeout=timeout)
+    output = cli_output(result)
+    attempts = 1
+    while attempts < 3 and agent_mail_transient_failure(result.code, output) and not confirmation_token_invalid(output):
+        time.sleep(0.8 * attempts)
+        result = run_agent_mail(args, cwd=cwd, timeout=timeout)
+        output = cli_output(result)
+        attempts += 1
+    return result
+
+
 def classify_agent_mail_auth_state(code: int, output: str) -> tuple[str, str, bool]:
     lowered = (output or "").lower()
     if code == 0:
@@ -636,13 +947,12 @@ def delivery_subject(kind: str, paper: dict[str, Any], task: dict[str, Any] | No
 
 
 def recipients_for_task(task: dict[str, Any] | None, explicit: list[str] | None = None) -> list[str]:
-    return unique_strings(
-        [
-            *(explicit or []),
-            *((task or {}).get("recipientEmails") or []),
-            *get_settings().agent_mail_default_recipients,
-        ]
-    )
+    if explicit:
+        return unique_strings(explicit)
+    task_recipients = unique_strings((task or {}).get("recipientEmails") or [])
+    if task_recipients:
+        return task_recipients
+    return unique_strings(get_settings().agent_mail_default_recipients)
 
 
 def mail_copy_for_task(task: dict[str, Any] | None, key: str) -> list[str]:
@@ -1125,12 +1435,12 @@ def attempt_mail_delivery(
         args.extend(["--confirmation-token", confirmation_token])
     delivery.update(status="sending", recipient=",".join(recipients), error="")
     repository._persist_item("mailDeliveries", delivery)
-    result = run_agent_mail(
+    result = run_agent_mail_send_with_retry(
         args,
         cwd=body_path.parent,
         timeout=getattr(get_settings(), "agent_mail_send_timeout_seconds", 180),
     )
-    output = f"{result.stdout}\n{result.stderr}".strip()
+    output = cli_output(result)
     token, summary = extract_confirmation(output)
     payload = parse_cli_json(output) or {}
     if result.code == 0 and not token:
@@ -1175,7 +1485,14 @@ def attempt_mail_delivery(
             repository.library["mailDeliveries"][index] = delivery
             repository._persist_item("mailDeliveries", delivery)
             return delivery
-        delivery.update(status="failed", error=output or f"AGENT_MAIL_EXIT_{result.code}")
+        if agent_mail_transient_failure(result.code, output):
+            delivery.update(
+                status="failed",
+                error=agent_mail_retryable_error_summary(output),
+                rawError=output or f"AGENT_MAIL_EXIT_{result.code}",
+            )
+        else:
+            delivery.update(status="failed", error=output or f"AGENT_MAIL_EXIT_{result.code}")
     repository.library["mailDeliveries"][index] = delivery
     repository._persist_item("mailDeliveries", delivery)
     return delivery
@@ -1204,6 +1521,25 @@ def literature_health() -> dict[str, Any]:
     }
 
 
+@router.get("/config")
+def get_runtime_config() -> dict[str, Any]:
+    return public_config_payload()
+
+
+@router.put("/config")
+async def update_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
+    values = payload.get("values") if isinstance(payload.get("values"), dict) else payload
+    if not isinstance(values, dict):
+        raise HTTPException(status_code=400, detail={"code": "CONFIG_VALUES_REQUIRED", "message": "请提交配置键值"})
+    update_env_values(values)
+    return public_config_payload()
+
+
+@router.post("/scheduler/run-due")
+async def run_due_scheduler_now() -> dict[str, Any]:
+    return {"runs": await run_due_scheduled_tasks_once()}
+
+
 @router.get("/library")
 def get_library() -> dict[str, Any]:
     return repository.serialize_library()
@@ -1227,8 +1563,8 @@ def create_task(payload: TaskPayload) -> dict[str, Any]:
         "id": f"task_{uuid4()}",
         "createdAt": now_iso(),
         "updatedAt": now_iso(),
-        "nextScheduledRunAt": "",
     }
+    task["nextScheduledRunAt"] = next_daily_run_iso(task)
     normalize_task_mail_push(task)
     repository.tasks = [task, *repository.tasks]
     repository._persist_item("tasks", task)
@@ -1241,6 +1577,7 @@ def update_task(task_id: str, payload: TaskPayload) -> dict[str, Any]:
         if task["id"] == task_id:
             updated = {**task, **payload.model_dump(), "updatedAt": now_iso()}
             normalize_task_mail_push(updated)
+            updated["nextScheduledRunAt"] = next_daily_run_iso(updated)
             repository.tasks[index] = updated
             repository._persist_item("tasks", updated)
             return {"task": updated, "tasks": visible_tasks()}
@@ -1254,8 +1591,11 @@ def delete_task(task_id: str) -> dict[str, Any]:
     return {"tasks": visible_tasks()}
 
 
-@router.post("/tasks/{task_id}:run")
-async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+async def execute_task_run(
+    task_id: str,
+    payload: dict[str, Any] | None = None,
+    event_sink: EventSink | None = None,
+) -> dict[str, Any]:
     task = next((item for item in repository.tasks if item["id"] == task_id), None)
     if not task:
         raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND"})
@@ -1264,7 +1604,12 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
     task["lastRunStartedAt"] = now_iso()
     repository._persist_item("tasks", task)
     try:
-        result = await perform_scan({**task, **(payload or {})}, task_id=task_id)
+        trigger = str((payload or {}).get("trigger") or "manual")
+        scan_payload = {**task, **(payload or {})}
+        if event_sink:
+            result = await perform_scan(scan_payload, task_id=task_id, trigger=trigger, event_sink=event_sink)
+        else:
+            result = await perform_scan(scan_payload, task_id=task_id, trigger=trigger)
         task["lastRunStatus"] = "succeeded"
         task["lastRunFinishedAt"] = now_iso()
         task["lastRunSavedCount"] = result["run"]["savedCount"]
@@ -1276,90 +1621,94 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
                 for paper in result["papers"]:
                     paper_with_fulltext = paper
                     if not paper_with_fulltext.get("localFullTextPath"):
-                        result["run"].setdefault("executionEvents", []).append(
-                            execution_event(
-                                "fulltext",
-                                "running",
-                                f"尝试获取 DOI/来源全文：{paper.get('title') or paper.get('doi')}。",
-                                paperId=paper.get("id"),
-                                title=paper.get("title"),
-                            )
+                        emit_event(
+                            result["run"].setdefault("executionEvents", []),
+                            event_sink,
+                            "fulltext",
+                            "running",
+                            f"尝试获取 DOI/来源全文：{paper.get('title') or paper.get('doi')}。",
+                            paperId=paper.get("id"),
+                            title=paper.get("title"),
                         )
                         paper_with_fulltext = (await fetch_fulltext_for_paper(dict(paper)))["paper"]
                         fulltext_status = paper_with_fulltext.get("fullTextStatus") or (
                             "ready" if paper_with_fulltext.get("localFullTextPath") else "unavailable"
                         )
-                        result["run"].setdefault("executionEvents", []).append(
-                            execution_event(
-                                "fulltext",
-                                "done" if paper_with_fulltext.get("localFullTextPath") else "failed",
-                                f"{'获取全文成功' if paper_with_fulltext.get('localFullTextPath') else '未获取到可分析全文'}：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
-                                paperId=paper_with_fulltext.get("id"),
-                                title=paper_with_fulltext.get("title"),
-                                fullTextStatus=fulltext_status,
-                            )
+                        emit_event(
+                            result["run"].setdefault("executionEvents", []),
+                            event_sink,
+                            "fulltext",
+                            "done" if paper_with_fulltext.get("localFullTextPath") else "failed",
+                            f"{'获取全文成功' if paper_with_fulltext.get('localFullTextPath') else '未获取到可分析全文'}：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
+                            paperId=paper_with_fulltext.get("id"),
+                            title=paper_with_fulltext.get("title"),
+                            fullTextStatus=fulltext_status,
                         )
                     digest_papers.append(paper_with_fulltext)
                     if paper_with_fulltext.get("localFullTextPath"):
-                        result["run"].setdefault("executionEvents", []).append(
-                            execution_event(
-                                "analysis",
-                                "running",
-                                f"开始 AI 分析：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
-                                paperId=paper_with_fulltext.get("id"),
-                                title=paper_with_fulltext.get("title"),
-                            )
+                        emit_event(
+                            result["run"].setdefault("executionEvents", []),
+                            event_sink,
+                            "analysis",
+                            "running",
+                            f"开始 AI 分析：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
+                            paperId=paper_with_fulltext.get("id"),
+                            title=paper_with_fulltext.get("title"),
                         )
                         report = await create_report([paper_with_fulltext], task.get("query") or "")
                         digest_reports.append(report)
-                        result["run"].setdefault("executionEvents", []).append(
-                            execution_event(
-                                "analysis",
-                                "done",
-                                f"AI 分析已完成：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
-                                paperId=paper_with_fulltext.get("id"),
-                                title=paper_with_fulltext.get("title"),
-                                reportId=report.get("id"),
-                            )
+                        emit_event(
+                            result["run"].setdefault("executionEvents", []),
+                            event_sink,
+                            "analysis",
+                            "done",
+                            f"AI 分析已完成：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
+                            paperId=paper_with_fulltext.get("id"),
+                            title=paper_with_fulltext.get("title"),
+                            reportId=report.get("id"),
                         )
                     else:
-                        result["run"].setdefault("executionEvents", []).append(
-                            execution_event(
-                                "analysis",
-                                "skipped",
-                                f"缺少可读全文，跳过 AI 分析：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
-                                paperId=paper_with_fulltext.get("id"),
-                                title=paper_with_fulltext.get("title"),
-                            )
+                        emit_event(
+                            result["run"].setdefault("executionEvents", []),
+                            event_sink,
+                            "analysis",
+                            "skipped",
+                            f"缺少可读全文，跳过 AI 分析：{paper_with_fulltext.get('title') or paper_with_fulltext.get('doi')}。",
+                            paperId=paper_with_fulltext.get("id"),
+                            title=paper_with_fulltext.get("title"),
                         )
             else:
                 digest_papers = list(result["papers"])
             if digest_papers:
-                result["run"].setdefault("executionEvents", []).append(
-                    execution_event(
-                        "mail",
-                        "running",
-                        f"生成任务汇总邮件：To {', '.join(task.get('recipientEmails') or [])}。",
-                    )
+                emit_event(
+                    result["run"].setdefault("executionEvents", []),
+                    event_sink,
+                    "mail",
+                    "running",
+                    f"生成任务汇总邮件：To {', '.join(task.get('recipientEmails') or [])}。",
                 )
                 delivery = add_task_digest_delivery(task, result["run"], digest_papers, digest_reports)
                 result["taskDigestDelivery"] = delivery
-                result["run"].setdefault("executionEvents", []).append(
-                    execution_event(
-                        "mail",
-                        "done" if delivery.get("status") == "sent" else "warning",
-                        f"任务汇总邮件{'已发送' if delivery.get('status') == 'sent' else '未发送'}：{delivery.get('status')}；{delivery.get('error') or '无错误详情'}。",
-                        deliveryId=delivery.get("id"),
-                        deliveryStatus=delivery.get("status"),
-                        error=delivery.get("error"),
-                    )
+                emit_event(
+                    result["run"].setdefault("executionEvents", []),
+                    event_sink,
+                    "mail",
+                    "done" if delivery.get("status") == "sent" else "warning",
+                    f"任务汇总邮件{'已发送' if delivery.get('status') == 'sent' else '未发送'}：{delivery.get('status')}；{delivery.get('error') or '无错误详情'}。",
+                    deliveryId=delivery.get("id"),
+                    deliveryStatus=delivery.get("status"),
+                    error=delivery.get("error"),
                 )
             else:
                 result["taskDigestDelivery"] = None
         elif task.get("notifyAfterRun"):
             result["taskDigestDelivery"] = None
-            result["run"].setdefault("executionEvents", []).append(
-                execution_event("mail", "skipped", "本次没有新入库文献，未生成任务汇总邮件。")
+            emit_event(
+                result["run"].setdefault("executionEvents", []),
+                event_sink,
+                "mail",
+                "skipped",
+                "本次没有新入库文献，未生成任务汇总邮件。",
             )
         repository._persist_item("tasks", task)
         repository._persist_item("scanRuns", result["run"])
@@ -1372,6 +1721,89 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
         task["lastRunFinishedAt"] = now_iso()
         repository._persist_item("tasks", task)
         raise
+
+
+def cleanup_run_jobs() -> None:
+    now = time.monotonic()
+    stale_ids = [
+        job_id
+        for job_id, job in RUN_JOBS.items()
+        if now - float(job.get("createdMono") or now) > RUN_JOB_TTL_SECONDS
+    ]
+    for job_id in stale_ids:
+        RUN_JOBS.pop(job_id, None)
+
+
+def public_run_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in job.items()
+        if key not in {"createdMono", "task"}
+    }
+
+
+@router.post("/tasks/{task_id}:run")
+async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return await execute_task_run(task_id, payload)
+
+
+@router.post("/tasks/{task_id}:run-async")
+async def start_task_run_job(task_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    task = next((item for item in repository.tasks if item["id"] == task_id), None)
+    if not task:
+        raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND"})
+    cleanup_run_jobs()
+    job_id = f"runjob_{uuid4().hex}"
+    job = {
+        "id": job_id,
+        "taskId": task_id,
+        "status": "running",
+        "events": [
+            execution_event(
+                "queue",
+                "running",
+                f"任务已进入后端执行队列：{task.get('query') or task_id}。",
+            )
+        ],
+        "createdAt": now_iso(),
+        "updatedAt": now_iso(),
+        "createdMono": time.monotonic(),
+        "result": None,
+        "error": "",
+    }
+    RUN_JOBS[job_id] = job
+
+    def event_sink(event: dict[str, Any]) -> None:
+        current = RUN_JOBS.get(job_id)
+        if not current:
+            return
+        current.setdefault("events", []).append(event)
+        current["updatedAt"] = now_iso()
+
+    async def worker() -> None:
+        try:
+            result = await execute_task_run(task_id, payload, event_sink=event_sink)
+            job["status"] = "done"
+            job["result"] = result
+            job["run"] = result.get("run")
+            job["updatedAt"] = now_iso()
+        except Exception as exc:
+            event_sink(execution_event("error", "failed", f"任务执行失败：{exc}。", error=str(exc)))
+            job["status"] = "failed"
+            job["error"] = str(exc)
+            job["updatedAt"] = now_iso()
+
+    asyncio.create_task(worker())
+    return {"job": public_run_job(job)}
+
+
+@router.get("/runs/{run_id}")
+def get_run_job(run_id: str) -> dict[str, Any]:
+    cleanup_run_jobs()
+    job = RUN_JOBS.get(run_id)
+    if not job:
+        raise HTTPException(status_code=404, detail={"code": "RUN_JOB_NOT_FOUND"})
+    return {"job": public_run_job(job)}
 
 
 @router.post("/analyze")

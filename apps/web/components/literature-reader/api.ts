@@ -105,6 +105,18 @@ export const api = {
     const response = await fetch(`${API_BASE}/mail/status`);
     return parseApiResponse(response, "无法读取邮箱绑定状态");
   },
+  async getConfig() {
+    const response = await fetch(`${API_BASE}/config`);
+    return parseApiResponse(response, "无法读取运行配置");
+  },
+  async updateConfig(values) {
+    const response = await fetch(`${API_BASE}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+    });
+    return parseApiResponse(response, "保存运行配置失败");
+  },
   async startMailAuth() {
     const response = await fetch(`${API_BASE}/mail/auth:start`, { method: "POST" });
     return parseApiResponse(response, "启动邮箱授权失败");
@@ -160,6 +172,18 @@ export const api = {
       body: JSON.stringify({}),
     });
     return parseApiResponse(response, "执行任务失败");
+  },
+  async runTaskAsync(id) {
+    const response = await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}:run-async`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    return parseApiResponse(response, "启动任务失败");
+  },
+  async getRunJob(id) {
+    const response = await fetch(`${API_BASE}/runs/${encodeURIComponent(id)}`);
+    return parseApiResponse(response, "读取任务进度失败");
   },
   async scan(payload) {
     const response = await fetch(`${API_BASE}/scan`, {

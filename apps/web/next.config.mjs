@@ -5,6 +5,7 @@ const distDir = process.env.NODE_ENV === "development" ? ".next-dev" : ".next";
 const nextConfig = {
   distDir,
   typedRoutes: false,
+  devIndicators: false,
   experimental: {
     // Next 15.5 enables the app segment explorer in dev by default. In this
     // project it has caused stale dev-runtime chunks to crash before the app

@@ -355,7 +355,7 @@ class EmailOutboxRecord(BaseModel):
     status: Literal["queued", "sent", "failed"]
     failure_reason: str | None = None
     unsubscribed: bool = False
-    provider: Literal["mock", "smtp", "api"] = "mock"
+    provider: Literal["mock", "smtp", "api", "agent_mail"] = "mock"
     created_at: datetime = Field(default_factory=now_utc)
     sent_at: datetime | None = None
 

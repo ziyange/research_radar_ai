@@ -1,9 +1,24 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+ROOT_DIR = Path(__file__).resolve().parents[4]
+
+
+def ensure_env_file() -> None:
+    target = ROOT_DIR / ".env"
+    if target.exists():
+        return
+    example = ROOT_DIR / ".env.example"
+    if example.exists():
+        target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        target.write_text("", encoding="utf-8")
 
 
 class Settings(BaseSettings):
@@ -92,4 +107,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    ensure_env_file()
     return Settings()

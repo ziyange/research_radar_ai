@@ -1,4 +1,7 @@
+import asyncio
+import time
 import zipfile
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -113,6 +116,145 @@ def test_literature_tasks_persist_to_local_storage_when_database_is_memory(monke
     reloaded = LiteratureRepository()
 
     assert any(item["id"] == task["id"] and item["query"] == task["query"] for item in reloaded.tasks)
+
+
+def test_literature_scheduler_runs_due_daily_task(monkeypatch) -> None:
+    monkeypatch.setattr(
+        literature,
+        "get_settings",
+        lambda: SimpleNamespace(literature_scheduler_enabled=True),
+    )
+    seen: dict[str, object] = {}
+    task = {
+        "id": f"task_scheduler_{uuid4().hex}",
+        "query": "scheduled nanomaterials plant",
+        "count": 1,
+        "yearFrom": 2021,
+        "minScore": 0,
+        "sources": ["crossref"],
+        "downloadOpenPdf": False,
+        "autoAnalyze": False,
+        "dailyEnabled": True,
+        "dailyTime": "09:00",
+        "dailyTimezone": "Asia/Shanghai",
+        "notifyAfterRun": False,
+        "lastScheduledRunDate": "",
+    }
+    literature.repository.tasks = [task, *[item for item in literature.repository.tasks if item["id"] != task["id"]]]
+
+    async def fake_perform_scan(payload, task_id=None, trigger="manual"):  # noqa: ANN001
+        seen["trigger"] = trigger
+        seen["task_id"] = task_id
+        run = {
+            "id": f"scan_scheduler_{uuid4().hex}",
+            "taskId": task_id,
+            "query": payload["query"],
+            "trigger": trigger,
+            "savedCount": 0,
+            "candidateCount": 0,
+            "duplicateCount": 0,
+            "savedPaperIds": [],
+            "sourceStatuses": [],
+            "queryPlan": [],
+            "executionEvents": [],
+            "targetMet": False,
+            "createdAt": literature.now_iso(),
+        }
+        return {"run": run, "papers": [], "duplicates": [], "library": literature.repository.serialize_library()}
+
+    monkeypatch.setattr(literature, "perform_scan", fake_perform_scan)
+
+    results = asyncio.run(
+        literature.run_due_scheduled_tasks_once(datetime(2026, 7, 3, 1, 5, tzinfo=timezone.utc))
+    )
+
+    assert results[0]["status"] == "succeeded"
+    assert seen["trigger"] == "scheduled"
+    assert task["lastScheduledRunDate"] == "2026-07-03"
+    assert task["lastRunStatus"] == "succeeded"
+    assert task["nextScheduledRunAt"]
+
+
+def test_literature_async_run_job_exposes_real_events(monkeypatch) -> None:
+    task = {
+        "id": f"task_async_{uuid4().hex}",
+        "query": "async nanomaterials plant",
+        "count": 1,
+        "yearFrom": 2021,
+        "minScore": 0,
+        "sources": ["crossref"],
+        "downloadOpenPdf": False,
+        "autoAnalyze": False,
+        "dailyEnabled": False,
+        "dailyTime": "09:00",
+        "dailyTimezone": "Asia/Shanghai",
+        "notifyAfterRun": False,
+    }
+    literature.repository.tasks = [task, *[item for item in literature.repository.tasks if item["id"] != task["id"]]]
+
+    async def fake_perform_scan(payload, task_id=None, trigger="manual", event_sink=None):  # noqa: ANN001
+        if event_sink:
+            event_sink(literature.execution_event("source", "running", "连接 crossref，查询 async。"))
+            event_sink(literature.execution_event("source", "done", "crossref 返回 1 条开放元数据。"))
+        run = {
+            "id": f"scan_async_{uuid4().hex}",
+            "taskId": task_id,
+            "query": payload["query"],
+            "trigger": trigger,
+            "savedCount": 0,
+            "candidateCount": 1,
+            "duplicateCount": 0,
+            "savedPaperIds": [],
+            "sourceStatuses": [{"source": "crossref", "query": payload["query"], "status": "succeeded", "count": 1}],
+            "queryPlan": [{"query": payload["query"], "source": "user"}],
+            "executionEvents": [],
+            "targetMet": False,
+            "createdAt": literature.now_iso(),
+        }
+        return {"run": run, "papers": [], "duplicates": [], "library": literature.repository.serialize_library()}
+
+    monkeypatch.setattr(literature, "perform_scan", fake_perform_scan)
+
+    started = client.post(f"/api/v1/literature/tasks/{task['id']}:run-async", json={})
+    assert started.status_code == 200
+    job_id = started.json()["job"]["id"]
+
+    job = {}
+    for _ in range(20):
+        response = client.get(f"/api/v1/literature/runs/{job_id}")
+        assert response.status_code == 200
+        job = response.json()["job"]
+        if job["status"] != "running":
+            break
+        time.sleep(0.05)
+
+    assert job["status"] == "done"
+    assert any("crossref" in event["message"] for event in job["events"])
+    assert job["result"]["run"]["query"] == task["query"]
+
+
+def test_literature_runtime_config_updates_env_without_echoing_secret(monkeypatch) -> None:
+    config_dir = literature.ROOT_DIR / "tmp" / f"config-test-{uuid4().hex}"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    env_file = config_dir / ".env"
+    example_file = config_dir / ".env.example"
+    example_file.write_text(
+        "AI_PROVIDER=mock\nOPENAI_API_KEY=old-secret\nOPENAI_MODEL=qwen-old\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(literature, "env_path", lambda: env_file)
+    monkeypatch.setattr(literature, "env_example_path", lambda: example_file)
+
+    payload = literature.public_config_payload()
+    secret_field = next(item for item in payload["fields"] if item["key"] == "OPENAI_API_KEY")
+    assert secret_field["value"] == ""
+    assert secret_field["hasValue"] is True
+
+    literature.update_env_values({"OPENAI_MODEL": "qwen3.6-plus", "OPENAI_API_KEY": ""})
+    values = literature.read_env_values()
+
+    assert values["OPENAI_MODEL"] == "qwen3.6-plus"
+    assert values["OPENAI_API_KEY"] == "old-secret"
 
 
 def test_literature_filters_known_test_artifacts_outside_pytest(monkeypatch) -> None:
@@ -902,6 +1044,56 @@ def test_literature_agent_mail_auto_confirm_timeout_is_visible(monkeypatch) -> N
     assert delivery["status"] == "failed"
     assert delivery["error"] == "AGENT_MAIL_TIMEOUT"
     assert delivery["confirmationToken"] == "ctk_timeout_confirm"
+
+
+def test_literature_agent_mail_alias_eof_retries_and_stays_retryable(monkeypatch) -> None:
+    monkeypatch.setattr(literature.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        literature,
+        "mail_status",
+        lambda: {
+            "enabled": True,
+            "installed": True,
+            "authorized": True,
+            "email": "sender@example.com",
+            "sendCapable": True,
+            "provider": "agent_mail",
+            "cli": "agently-cli",
+            "message": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        literature,
+        "get_settings",
+        lambda: SimpleNamespace(
+            agent_mail_auto_confirm=True,
+            agent_mail_default_recipients=[],
+            agent_mail_send_timeout_seconds=180,
+        ),
+    )
+    calls: list[list[str]] = []
+    output = (
+        '{"ok": false, "error": {"type": "api_error", "message": '
+        '"resolve alias: failed to resolve alias from /v1/me: Get \\"https://api.agent.qq.com/v1/me\\": EOF"}}'
+    )
+
+    def fake_run_agent_mail(args, cwd=None, timeout=45):  # noqa: ANN001, ARG001
+        calls.append(args)
+        return literature.CliResult(1, output, "")
+
+    monkeypatch.setattr(literature, "run_agent_mail", fake_run_agent_mail)
+
+    delivery = literature.add_mail_delivery(
+        "mail_test",
+        {"id": "mail_test_alias_eof", "title": "Agent Mail alias EOF", "abstract": "test"},
+        task={"query": "agent mail alias eof"},
+        recipients=["recipient@example.com"],
+    )
+
+    assert len(calls) == 3
+    assert delivery["status"] == "failed"
+    assert "暂时无法解析" in delivery["error"]
+    assert "/v1/me" in delivery["rawError"]
 
 
 def test_literature_agent_mail_authorized_is_send_enabled(monkeypatch) -> None:

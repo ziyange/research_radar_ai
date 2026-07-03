@@ -168,13 +168,14 @@ export function mailBindingLabel(mailStatus) {
 function ActiveRunLogCard({ log, runAnalyzeState }) {
   if (!log) return null;
   const analyzeState = log.runId ? runAnalyzeState[log.runId] : null;
+  const steps = log.steps || [];
   const currentStep =
-    (log.steps || []).find((step) => step.status === "running") ||
-    (log.steps || []).find((step) => step.status === "pending") ||
-    (log.steps || [])[0];
-  const totalSteps = (log.steps || []).length;
+    steps.find((step) => step.status === "running") ||
+    steps.find((step) => step.status === "pending") ||
+    steps[steps.length - 1];
+  const totalSteps = steps.length;
   const currentStepIndex = currentStep
-    ? Math.max(1, (log.steps || []).findIndex((step) => step === currentStep) + 1)
+    ? Math.max(1, steps.findIndex((step) => step === currentStep) + 1)
     : 0;
   return (
     <div className={`active-run-card ${log.status}`}>
@@ -198,7 +199,7 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
         <div className="active-current-step">
           <span>{currentStep.status === "failed" ? "!" : "…"}</span>
           <div>
-            <strong>当前步骤</strong>
+            <strong>{log.status === "running" ? "当前步骤" : "最近步骤"}</strong>
             <p>{currentStep.text}</p>
             {totalSteps ? (
               <small className="active-current-progress">
@@ -231,6 +232,9 @@ export function mailStatusText(status) {
 function mailErrorText(error) {
   const text = String(error || "");
   if (!text) return "";
+  if (/\/v1\/me|resolve alias|EOF/i.test(text)) {
+    return "Agent Mail 服务暂时无法解析已授权发件邮箱（/v1/me EOF）。邮箱授权不一定失效，请稍后重试发送。";
+  }
   if (text === "AGENT_MAIL_CONFIRMATION_REQUIRED") {
     return "等待确认发送，请点击右侧“确认发送”完成投递。";
   }
@@ -305,8 +309,8 @@ function canRetryMailDelivery(delivery) {
   if (delivery.error === "MAIL_RECIPIENT_REQUIRED") return false;
   if (delivery.status === "queued") return true;
   if (delivery.status !== "failed") return false;
-  const error = String(delivery.error || "");
-  return /confirmation token|AGENT_MAIL|MAIL_/i.test(error);
+  const error = `${delivery.error || ""}\n${delivery.rawError || ""}`;
+  return /confirmation token|AGENT_MAIL|MAIL_|Agent Mail|\/v1\/me|resolve alias|EOF/i.test(error);
 }
 
 function RunMailDeliverySection({ deliveries, onConfirmMailDelivery, onRetryMailDelivery, loading }) {
