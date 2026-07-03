@@ -9,19 +9,34 @@ function fieldInputType(field) {
   return "text";
 }
 
+function normalizeEmailProvider(value) {
+  return value === "smtp" ? "smtp" : "agent_mail";
+}
+
+function optionLabel(option) {
+  if (option === "agent_mail") return "Agent Mail";
+  if (option === "smtp") return "SMTP";
+  return option;
+}
+
 export function SettingsModal({ config, loading, onClose, onSave }) {
-  const [values, setValues] = useState(() =>
-    Object.fromEntries((config?.fields || []).map((field) => [field.key, field.value ?? ""])),
-  );
+  const [values, setValues] = useState(() => {
+    const initial = Object.fromEntries((config?.fields || []).map((field) => [field.key, field.value ?? ""]));
+    initial.EMAIL_PROVIDER = normalizeEmailProvider(initial.EMAIL_PROVIDER);
+    return initial;
+  });
+  const selectedEmailProvider = normalizeEmailProvider(values.EMAIL_PROVIDER);
   const groups = useMemo(() => {
     const map = new Map();
     for (const field of config?.fields || []) {
       const group = field.group || "其他";
+      if (group === "邮箱推送 / Agent Mail" && selectedEmailProvider !== "agent_mail") continue;
+      if (group === "邮箱推送 / SMTP" && selectedEmailProvider !== "smtp") continue;
       if (!map.has(group)) map.set(group, []);
       map.get(group).push(field);
     }
     return [...map.entries()];
-  }, [config]);
+  }, [config, selectedEmailProvider]);
 
   function update(key, value) {
     setValues((current) => ({ ...current, [key]: value }));
@@ -29,7 +44,7 @@ export function SettingsModal({ config, loading, onClose, onSave }) {
 
   function submit(event) {
     event.preventDefault();
-    onSave(values);
+    onSave({ ...values, EMAIL_PROVIDER: selectedEmailProvider });
   }
 
   return (
@@ -38,7 +53,7 @@ export function SettingsModal({ config, loading, onClose, onSave }) {
         <div className="modal-header">
           <div>
             <h2>运行设置</h2>
-            <p className="modal-hint">修改后会写入后端根目录 .env。部分配置需要重启后端或前端开发服务才会完全生效。</p>
+            <p className="modal-hint">修改后会写入后端根目录 .env。选择邮件推送方式后，只显示对应方式的配置项。</p>
           </div>
           <button type="button" className="modal-close" onClick={onClose} aria-label="关闭">
             <X size={18} />
@@ -54,10 +69,13 @@ export function SettingsModal({ config, loading, onClose, onSave }) {
                   <label className="settings-field" key={field.key}>
                     <span>{field.label}</span>
                     {field.type === "select" ? (
-                      <select value={values[field.key] ?? ""} onChange={(event) => update(field.key, event.target.value)}>
+                      <select
+                        value={field.key === "EMAIL_PROVIDER" ? selectedEmailProvider : values[field.key] ?? ""}
+                        onChange={(event) => update(field.key, event.target.value)}
+                      >
                         {(field.options || []).map((option) => (
                           <option value={option} key={option}>
-                            {option}
+                            {optionLabel(option)}
                           </option>
                         ))}
                       </select>

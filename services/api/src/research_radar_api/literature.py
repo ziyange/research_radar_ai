@@ -63,7 +63,7 @@ CONFIG_FIELDS: list[dict[str, Any]] = [
     {"key": "AGENT_SOURCE_TIMEOUT_SECONDS", "label": "数据源请求超时秒数", "description": "OpenAlex/Crossref 单次请求最长等待时间。", "group": "检索数据源", "type": "number"},
     {"key": "LITERATURE_SCHEDULER_ENABLED", "label": "每日自动任务", "description": "开启后 FastAPI 服务运行期间会按任务设置每日执行。", "group": "自动化", "type": "boolean"},
     {"key": "LITERATURE_STORAGE_ROOT", "label": "本地文献存储目录", "description": "PDF、Markdown、邮件附件和本地实体存储目录。", "group": "自动化", "type": "text"},
-    {"key": "EMAIL_PROVIDER", "label": "邮件发送方式", "description": "agent_mail 使用 Agent Mail CLI；smtp 使用 SMTP 自动发送。", "group": "邮箱推送 / 通用", "type": "select", "options": ["mock", "smtp", "agent_mail"]},
+    {"key": "EMAIL_PROVIDER", "label": "邮件发送方式", "description": "agent_mail 使用 Agent Mail CLI；smtp 使用 SMTP 自动发送。", "group": "邮箱推送 / 通用", "type": "select", "options": ["agent_mail", "smtp"]},
     {"key": "AGENT_MAIL_ENABLED", "label": "启用 Agent Mail", "description": "开启后可绑定 Agent Mail 账号进行邮件发送。", "group": "邮箱推送 / Agent Mail", "type": "boolean"},
     {"key": "AGENT_MAIL_CLI", "label": "Agent Mail CLI", "description": "agently-cli 可执行文件名或路径。", "group": "邮箱推送 / Agent Mail", "type": "text"},
     {"key": "AGENT_MAIL_AUTO_CONFIRM", "label": "自动提交确认令牌", "description": "任务邮件发送时自动提交 CLI 返回的 confirmation-token。", "group": "邮箱推送 / Agent Mail", "type": "boolean"},
