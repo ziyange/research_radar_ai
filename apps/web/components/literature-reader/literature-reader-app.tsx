@@ -60,8 +60,78 @@ function executionEventsToSteps(events, fallbackSteps = [], complete = false) {
     }
     return {
       key: event.id || `${event.stage || "event"}-${index}`,
+      stage: event.stage || "event",
       status,
+      at: event.at || "",
       text: event.message || `${event.stage || "步骤"} 已完成`,
+    };
+  });
+}
+
+function stageStatusFromEvents(stageKeys, events, complete) {
+  const stageEvents = (events || []).filter((event) => stageKeys.includes(event.stage));
+  if (!stageEvents.length) return "pending";
+  if (stageEvents.some((event) => event.status === "running")) return complete ? "done" : "running";
+  if (stageEvents.some((event) => event.status === "failed")) return "warning";
+  if (stageEvents.some((event) => event.status === "skipped")) return "skipped";
+  return "done";
+}
+
+function majorStepsFromEvents(task, events, complete = false) {
+  const sources = (task.sources || ["openalex", "crossref"]).join(" / ");
+  const definitions = [
+    {
+      key: "prepare",
+      stages: ["queue", "prepare", "plan"],
+      title: "任务准备",
+      text: "读取参数并生成检索计划。",
+    },
+    {
+      key: "source",
+      stages: ["source"],
+      title: "公开数据源检索",
+      text: `连接 ${sources}，按检索式拉取候选文献。`,
+    },
+    {
+      key: "filter",
+      stages: ["filter", "dedupe"],
+      title: "筛选与去重",
+      text: "按年份、评分、相关性筛选，并与本地文献库去重。",
+    },
+    {
+      key: "save",
+      stages: ["save", "fulltext"],
+      title: "入库与全文",
+      text: "保存新文献，并按配置尝试获取 PDF/HTML 全文。",
+    },
+    ...(task.autoAnalyze
+      ? [
+          {
+            key: "analysis",
+            stages: ["analysis"],
+            title: "AI 精读分析",
+            text: "检查本地全文后生成单篇 AI 精读报告。",
+          },
+        ]
+      : []),
+    ...(task.notifyAfterRun
+      ? [
+          {
+            key: "mail",
+            stages: ["mail"],
+            title: "任务邮件推送",
+            text: "生成任务汇总邮件与附件包并发送。",
+          },
+        ]
+      : []),
+  ];
+  return definitions.map((definition) => {
+    const status = stageStatusFromEvents(definition.stages, events, complete);
+    return {
+      key: definition.key,
+      title: definition.title,
+      text: definition.text,
+      status,
     };
   });
 }
@@ -437,29 +507,20 @@ export function App() {
         `评分≥${task.minScore ?? 70}`,
         `来源 ${sources}`,
       ],
-      steps: [
-        { key: "prepare", status: "done", text: "读取任务参数：研究方向、篇数、年份、评分阈值、数据源和去重策略。" },
-        { key: "plan", status: "running", text: "扩展检索式：把中文研究方向转换为可用于 OpenAlex/Crossref 的英文查询组合。" },
-        { key: "search", status: "pending", text: `准备连接公开数据源：${sources}，逐个关键词拉取候选文献。` },
-        { key: "score", status: "pending", text: "等待按来源相关性、年份、评分、开放获取状态筛选候选。" },
-        { key: "dedupe", status: "pending", text: "等待与本地文献库按 DOI/标题去重，避免重复入库。" },
-        { key: "save", status: "pending", text: "等待保存新文献，并按配置尝试获取开放 PDF 或 HTML 全文。" },
-        ...(task.autoAnalyze
-          ? [{ key: "analysis", status: "pending", text: "等待采集完成后，逐篇检查全文并提交 AI 分析。" }]
-          : []),
-        ...(task.notifyAfterRun
-          ? [{ key: "mail", status: "pending", text: "等待任务完成后生成任务汇总邮件。" }]
-          : []),
-      ],
+      steps: majorStepsFromEvents(task, [], false).map((step, index) =>
+        index === 0 ? { ...step, status: "running" } : step,
+      ),
+      events: [],
     };
   }
 
   function buildCompletedRunLog(task, run) {
     const base = buildRunningLog(task);
-    const steps = executionEventsToSteps(run?.executionEvents || [], base.steps, true).map((step) => ({
+    const events = executionEventsToSteps(run?.executionEvents || [], [], true).map((step) => ({
       ...step,
       status: step.status === "running" || step.status === "pending" ? "done" : step.status,
     }));
+    const steps = majorStepsFromEvents(task, run?.executionEvents || [], true);
     return {
       ...base,
       id: run?.id || base.id,
@@ -467,6 +528,7 @@ export function App() {
       status: run?.savedCount > 0 ? "done" : run?.targetMet === false ? "warning" : "done",
       startedAt: run?.createdAt || base.startedAt,
       steps,
+      events,
       targetMet: run?.targetMet,
       exhaustedReason: run?.exhaustedReason || "",
       errorMessage: run?._errorMessage || "",
@@ -475,7 +537,9 @@ export function App() {
 
   function buildRunJobLog(task, job) {
     const base = buildRunningLog(task);
-    const steps = executionEventsToSteps(job?.events || [], base.steps, job?.status !== "running");
+    const rawEvents = job?.events || [];
+    const steps = majorStepsFromEvents(task, rawEvents, job?.status !== "running");
+    const events = executionEventsToSteps(rawEvents, [], job?.status !== "running");
     return {
       ...base,
       id: job?.id || base.id,
@@ -483,6 +547,7 @@ export function App() {
       status: job?.status === "failed" ? "failed" : job?.status === "running" ? "running" : "done",
       startedAt: job?.createdAt || base.startedAt,
       steps,
+      events,
       errorMessage: job?.error || "",
       targetMet: job?.run?.targetMet,
       exhaustedReason: job?.run?.exhaustedReason || "",

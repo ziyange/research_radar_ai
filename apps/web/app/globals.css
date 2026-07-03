@@ -3031,6 +3031,53 @@ input {
   font-weight: 900;
 }
 
+.active-live-events {
+  display: grid;
+  gap: 7px;
+  padding: 10px 11px;
+  background: rgba(255, 255, 255, 0.74);
+  border: 1px solid #e0e9e3;
+  border-radius: 9px;
+}
+
+.active-live-events > strong {
+  color: #31423d;
+  font-size: 12px;
+}
+
+.active-live-events div {
+  display: grid;
+  gap: 6px;
+}
+
+.active-live-events p {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  gap: 8px;
+  margin: 0;
+  color: #3a4742;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.active-live-events p span {
+  color: #7a8882;
+  font-variant-numeric: tabular-nums;
+}
+
+.active-live-events p.running {
+  color: #8a5a00;
+}
+
+.active-live-events p.failed,
+.active-live-events p.warning {
+  color: #a4473d;
+}
+
+.active-live-events p.skipped {
+  color: #6b7671;
+}
+
 .active-step {
   display: grid;
   grid-template-columns: 24px 1fr;

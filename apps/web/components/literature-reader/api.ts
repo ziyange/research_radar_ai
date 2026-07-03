@@ -62,6 +62,21 @@ async function parseApiResponse(response, fallbackMessage) {
   return data;
 }
 
+async function fetchApi(url, options, fallbackMessage) {
+  try {
+    const response = await fetch(url, options);
+    return parseApiResponse(response, fallbackMessage);
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    if (/server disconnected|socket hang up|econnreset|failed to fetch|networkerror/i.test(message)) {
+      throw new Error(
+        "本地 API 连接中断。请确认 FastAPI 服务仍运行在 127.0.0.1:8010；如果后端刚刚热重载，请等待几秒后重新执行任务。",
+      );
+    }
+    throw error;
+  }
+}
+
 function apiErrorMessage(data, fallbackMessage) {
   const candidates = [data?.message, data?.run?.error, data?.error, data?.detail];
   for (const candidate of candidates) {
@@ -174,16 +189,18 @@ export const api = {
     return parseApiResponse(response, "执行任务失败");
   },
   async runTaskAsync(id) {
-    const response = await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}:run-async`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    return parseApiResponse(response, "启动任务失败");
+    return fetchApi(
+      `${API_BASE}/tasks/${encodeURIComponent(id)}:run-async`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      "启动任务失败",
+    );
   },
   async getRunJob(id) {
-    const response = await fetch(`${API_BASE}/runs/${encodeURIComponent(id)}`);
-    return parseApiResponse(response, "读取任务进度失败");
+    return fetchApi(`${API_BASE}/runs/${encodeURIComponent(id)}`, undefined, "读取任务进度失败");
   },
   async scan(payload) {
     const response = await fetch(`${API_BASE}/scan`, {

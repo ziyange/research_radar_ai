@@ -169,14 +169,17 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
   if (!log) return null;
   const analyzeState = log.runId ? runAnalyzeState[log.runId] : null;
   const steps = log.steps || [];
+  const liveEvents = log.events || [];
   const currentStep =
     steps.find((step) => step.status === "running") ||
-    steps.find((step) => step.status === "pending") ||
+    (log.status === "running" ? steps.find((step) => step.status === "pending") : null) ||
+    [...steps].reverse().find((step) => step.status !== "pending") ||
     steps[steps.length - 1];
   const totalSteps = steps.length;
   const currentStepIndex = currentStep
     ? Math.max(1, steps.findIndex((step) => step === currentStep) + 1)
     : 0;
+  const recentEvents = [...liveEvents].slice(-6).reverse();
   return (
     <div className={`active-run-card ${log.status}`}>
       <div className="active-run-header">
@@ -199,13 +202,28 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
         <div className="active-current-step">
           <span>{currentStep.status === "failed" ? "!" : "…"}</span>
           <div>
-            <strong>{log.status === "running" ? "当前步骤" : "最近步骤"}</strong>
+            <strong>
+              {log.status === "running" ? "当前步骤" : "最近步骤"}：{currentStep.title || currentStep.text}
+            </strong>
             <p>{currentStep.text}</p>
             {totalSteps ? (
               <small className="active-current-progress">
                 {currentStepIndex}/{totalSteps}
               </small>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+      {recentEvents.length ? (
+        <div className="active-live-events">
+          <strong>实时动态日志</strong>
+          <div>
+            {recentEvents.map((event) => (
+              <p className={event.status || "done"} key={event.key}>
+                <span>{formatRunTime(event.at)}</span>
+                {event.text}
+              </p>
+            ))}
           </div>
         </div>
       ) : null}
