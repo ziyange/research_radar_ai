@@ -84,6 +84,9 @@ export function App() {
   const [taskModal, setTaskModal] = useState(null);
   const [mailBindModal, setMailBindModal] = useState(false);
   const [mailAuthUrl, setMailAuthUrl] = useState("");
+  const [mailAuthSessionId, setMailAuthSessionId] = useState("");
+  const [mailAuthSession, setMailAuthSession] = useState(null);
+  const [mailAuthWindowOpened, setMailAuthWindowOpened] = useState(false);
   const [expandedRunIds, setExpandedRunIds] = useState({});
   const [runAnalyzeState, setRunAnalyzeState] = useState({});
   const [activeRunLog, setActiveRunLog] = useState(null);
@@ -92,6 +95,8 @@ export function App() {
   const pulseTimerRef = useRef(null);
   const activityTimersRef = useRef({});
   const mailReloginPromptedRef = useRef(false);
+  const mailAuthWindowRef = useRef(null);
+  const lastMailAuthUrlRef = useRef("");
 
   function removeActivity(id) {
     setActivities((current) => current.filter((item) => item.id !== id));
@@ -150,6 +155,48 @@ export function App() {
       setStatus({ tone: "warning", message: "邮箱授权已失效，请重新登录后再发送任务邮件" });
     }
   }, [mailStatus]);
+
+  useEffect(() => {
+    if (!mailAuthSessionId) return undefined;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const data = await api.getMailAuthSession(mailAuthSessionId);
+        if (stopped) return;
+        const session = data.session || null;
+        setMailAuthSession(session);
+        if (data.mail) setMailStatus(data.mail);
+        if (session?.status === "authorized") {
+          setMailStatus(data.mail || { authorized: true, email: session.email || "" });
+          try {
+            mailAuthWindowRef.current?.close();
+          } catch {
+            // The auth window can already be closed or cross-origin.
+          }
+          mailAuthWindowRef.current = null;
+          lastMailAuthUrlRef.current = "";
+          setMailBindModal(false);
+          setMailAuthSessionId("");
+          setMailAuthSession(null);
+          setMailAuthUrl("");
+          setMailAuthWindowOpened(false);
+          setStatus({ tone: "success", message: `邮箱绑定成功${session.email ? `：${session.email}` : ""}` });
+        } else if (session?.status === "failed" || session?.status === "timeout") {
+          setMailAuthSessionId("");
+          lastMailAuthUrlRef.current = "";
+          setStatus({ tone: "error", message: session.error || "邮箱授权失败，请重新登录" });
+        }
+      } catch (err) {
+        if (!stopped) setStatus({ tone: "error", message: err.message });
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, 2000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [mailAuthSessionId]);
 
   const selectedPaper = useMemo(
     () => library.papers?.find((paper) => paper.id === selectedPaperId) || library.papers?.[0],
@@ -237,6 +284,12 @@ export function App() {
   }
 
   async function bindAgentMail(forceRebind = false) {
+    if (mailAuthSessionId && mailAuthUrl) {
+      setMailBindModal(true);
+      openMailAuthWindow(mailAuthUrl);
+      setStatus({ tone: "warning", message: "邮箱授权窗口已打开，请先完成当前登录" });
+      return;
+    }
     setError("");
     setLoading("mail-auth");
     try {
@@ -251,11 +304,49 @@ export function App() {
       const data = await api.startMailAuth();
       if (data.authUrl) {
         setMailAuthUrl(data.authUrl);
-        window.open(data.authUrl, "_blank", "noopener,noreferrer");
+        setMailAuthSessionId(data.sessionId || "");
+        setMailAuthSession(data.session || null);
+        openMailAuthWindow(data.authUrl);
         setStatus({ tone: "running", message: "Agent Mail 授权已启动；请在打开的页面完成扫码登录" });
       }
-      window.setTimeout(() => refresh().catch(() => null), 4000);
-      window.setTimeout(() => refresh().catch(() => null), 12000);
+    } catch (err) {
+      setError(err.message);
+      setStatus({ tone: "error", message: err.message });
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  function openMailAuthWindow(url = mailAuthUrl) {
+    if (!url) return false;
+    if (
+      mailAuthWindowRef.current &&
+      !mailAuthWindowRef.current.closed &&
+      lastMailAuthUrlRef.current === url
+    ) {
+      mailAuthWindowRef.current.focus();
+      setMailAuthWindowOpened(true);
+      return true;
+    }
+    const popup = window.open(url, "research-radar-agent-mail-auth", "width=960,height=760");
+    mailAuthWindowRef.current = popup;
+    lastMailAuthUrlRef.current = url;
+    setMailAuthWindowOpened(Boolean(popup));
+    return Boolean(popup);
+  }
+
+  async function refreshMailStatus() {
+    setLoading("mail-refresh");
+    try {
+      const data = await api.getMailStatus();
+      setMailStatus(data);
+      if (data.authorized) {
+        setStatus({ tone: "success", message: `邮箱状态已刷新：${data.email}` });
+      } else if (mailNeedsRelogin(data)) {
+        setStatus({ tone: "warning", message: data.authIssue || "邮箱授权已失效，请重新登录" });
+      } else {
+        setStatus({ tone: "warning", message: "邮箱尚未绑定" });
+      }
     } catch (err) {
       setError(err.message);
       setStatus({ tone: "error", message: err.message });
@@ -272,21 +363,6 @@ export function App() {
       setLibrary(data.library);
       const message = data.delivery?.status === "sent" ? "邮件发送已确认" : "确认令牌已刷新，请再次确认发送";
       setStatus({ tone: "success", message });
-    } catch (err) {
-      setError(err.message);
-      setStatus({ tone: "error", message: err.message });
-    } finally {
-      setLoading(null);
-    }
-  }
-
-  async function confirmPendingMailDeliveries() {
-    setLoading("mail-confirm-all");
-    try {
-      const data = await api.confirmPendingMailDeliveries();
-      setLibrary(data.library);
-      const sentCount = (data.confirmed || []).filter((item) => item.status === "sent").length;
-      setStatus({ tone: "success", message: sentCount ? `已确认发送 ${sentCount} 封邮件` : "已处理待确认邮件" });
     } catch (err) {
       setError(err.message);
       setStatus({ tone: "error", message: err.message });
@@ -875,10 +951,7 @@ export function App() {
             setExpandedRunIds={setExpandedRunIds}
             runAnalyzeState={runAnalyzeState}
             mailDeliveries={library.mailDeliveries || []}
-            mailStatus={mailStatus}
-            onBindMail={() => setMailBindModal(true)}
             onConfirmMailDelivery={confirmMailDelivery}
-            onConfirmPendingMailDeliveries={confirmPendingMailDeliveries}
             onRetryMailDelivery={retryMailDelivery}
             loading={loading}
           />
@@ -1009,14 +1082,15 @@ export function App() {
         <MailBindModal
           mailStatus={mailStatus}
           authUrl={mailAuthUrl}
+          authSession={mailAuthSession}
+          authWindowOpened={mailAuthWindowOpened}
           loading={loading === "mail-auth"}
+          refreshLoading={loading === "mail-refresh"}
           onClose={() => setMailBindModal(false)}
           onBind={() => bindAgentMail(false)}
           onRebind={() => bindAgentMail(true)}
-          onOpenAuthUrl={() => {
-            if (mailAuthUrl) window.open(mailAuthUrl, "_blank", "noopener,noreferrer");
-          }}
-          onRefresh={() => refresh().catch(() => null)}
+          onOpenAuthUrl={() => openMailAuthWindow()}
+          onRefresh={refreshMailStatus}
         />
       ) : null}
       <ActivityCenter

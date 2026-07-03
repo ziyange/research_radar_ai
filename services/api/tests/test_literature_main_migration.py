@@ -115,6 +115,59 @@ def test_literature_tasks_persist_to_local_storage_when_database_is_memory(monke
     assert any(item["id"] == task["id"] and item["query"] == task["query"] for item in reloaded.tasks)
 
 
+def test_literature_filters_known_test_artifacts_outside_pytest(monkeypatch) -> None:
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    assert repository_module.is_test_artifact(
+        "literature_tasks",
+        {
+            "id": "task_digest_push",
+            "query": "nanomaterials plant",
+            "count": 3,
+            "minScore": 50,
+            "recipientEmails": ["recipient@example.com"],
+        },
+    )
+    assert repository_module.is_test_artifact(
+        "literature_tasks",
+        {
+            "id": f"task_{uuid4()}",
+            "query": "nanomaterials plant",
+            "count": 3,
+            "minScore": 50,
+            "recipientEmails": ["recipient@example.com"],
+        },
+    )
+    assert not repository_module.is_test_artifact(
+        "literature_tasks",
+        {
+            "id": f"task_{uuid4()}",
+            "query": "nanomaterials plant",
+            "count": 3,
+            "minScore": 50,
+            "recipientEmails": ["real-user@example.com"],
+        },
+    )
+
+
+def test_literature_pytest_does_not_write_global_entity_files() -> None:
+    task_id = f"task_pytest_no_real_{uuid4().hex}"
+    target = literature.repository.entities_dir / "literature_tasks" / f"{task_id}.json"
+    target.unlink(missing_ok=True)
+
+    literature.repository._persist_item(
+        "tasks",
+        {
+            "id": task_id,
+            "query": "pytest should not write real storage",
+            "count": 1,
+            "createdAt": "2026-01-01T00:00:00+00:00",
+        },
+    )
+
+    assert not target.exists()
+
+
 def test_literature_scan_degrades_when_openalex_fails(monkeypatch) -> None:
     async def fake_openalex(query, year_from, limit):  # noqa: ANN001, ARG001
         raise RuntimeError("Server error '503 Service Unavailable'")
@@ -913,6 +966,110 @@ def test_literature_agent_mail_expired_status_requires_login(monkeypatch) -> Non
     assert status["requiresLogin"] is True
     assert status["authState"] == "refresh_failed"
     assert "重新登录" in status["authIssue"]
+
+
+def test_literature_mail_auth_session_poll_authorized(monkeypatch) -> None:
+    class FakeProcess:
+        stdout = None
+
+        def poll(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            return None
+
+    session_id = f"mail_auth_test_{uuid4().hex}"
+    literature.MAIL_AUTH_SESSIONS.clear()
+    with literature.MAIL_AUTH_LOCK:
+        literature.MAIL_AUTH_SESSIONS[session_id] = {
+            "id": session_id,
+            "status": "running",
+            "authUrl": "https://agent.qq.com/oauth/test",
+            "output": "",
+            "error": "",
+            "email": "",
+            "startedAt": literature.now_iso(),
+            "startedMono": literature.time.monotonic(),
+            "process": FakeProcess(),
+        }
+
+    monkeypatch.setattr(
+        literature,
+        "mail_status",
+        lambda: {
+            "enabled": True,
+            "installed": True,
+            "authorized": True,
+            "email": "sender@example.com",
+            "sendCapable": True,
+            "provider": "agent_mail",
+            "authState": "authorized",
+            "authIssue": "",
+            "requiresLogin": False,
+            "message": "ok",
+        },
+    )
+
+    response = client.get(f"/api/v1/literature/mail/auth:sessions/{session_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session"]["status"] == "authorized"
+    assert payload["session"]["email"] == "sender@example.com"
+    assert payload["mail"]["authorized"] is True
+    literature.MAIL_AUTH_SESSIONS.clear()
+
+
+def test_literature_mail_auth_session_poll_failed(monkeypatch) -> None:
+    class FakeProcess:
+        stdout = None
+
+        def poll(self) -> int:
+            return 1
+
+        def terminate(self) -> None:
+            return None
+
+    session_id = f"mail_auth_test_{uuid4().hex}"
+    literature.MAIL_AUTH_SESSIONS.clear()
+    with literature.MAIL_AUTH_LOCK:
+        literature.MAIL_AUTH_SESSIONS[session_id] = {
+            "id": session_id,
+            "status": "running",
+            "authUrl": "https://agent.qq.com/oauth/test",
+            "output": "",
+            "error": "",
+            "email": "",
+            "startedAt": literature.now_iso(),
+            "startedMono": literature.time.monotonic(),
+            "process": FakeProcess(),
+        }
+
+    monkeypatch.setattr(
+        literature,
+        "mail_status",
+        lambda: {
+            "enabled": True,
+            "installed": True,
+            "authorized": False,
+            "email": "",
+            "sendCapable": False,
+            "provider": "agent_mail",
+            "authState": "expired",
+            "authIssue": "邮箱授权已失效，请重新登录。",
+            "requiresLogin": True,
+            "message": "Authorization required",
+        },
+    )
+
+    response = client.get(f"/api/v1/literature/mail/auth:sessions/{session_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session"]["status"] == "failed"
+    assert "重新登录" in payload["session"]["error"]
+    assert payload["mail"]["requiresLogin"] is True
+    literature.MAIL_AUTH_SESSIONS.clear()
 
 
 def test_literature_smtp_delivery_sends_without_confirmation(monkeypatch) -> None:

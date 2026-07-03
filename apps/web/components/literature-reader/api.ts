@@ -109,6 +109,10 @@ export const api = {
     const response = await fetch(`${API_BASE}/mail/auth:start`, { method: "POST" });
     return parseApiResponse(response, "启动邮箱授权失败");
   },
+  async getMailAuthSession(sessionId) {
+    const response = await fetch(`${API_BASE}/mail/auth:sessions/${encodeURIComponent(sessionId)}`);
+    return parseApiResponse(response, "读取邮箱授权状态失败");
+  },
   async logoutMailAuth() {
     const response = await fetch(`${API_BASE}/mail/auth:logout`, { method: "POST" });
     return parseApiResponse(response, "退出邮箱授权失败");

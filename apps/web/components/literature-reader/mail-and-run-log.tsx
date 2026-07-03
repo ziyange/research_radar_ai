@@ -71,7 +71,19 @@ function SourceStatusDigest({ statuses }) {
   );
 }
 
-export function MailBindModal({ mailStatus, authUrl, loading, onClose, onBind, onRebind, onOpenAuthUrl, onRefresh }) {
+export function MailBindModal({
+  mailStatus,
+  authUrl,
+  authSession,
+  authWindowOpened,
+  loading,
+  refreshLoading,
+  onClose,
+  onBind,
+  onRebind,
+  onOpenAuthUrl,
+  onRefresh,
+}) {
   const bound = Boolean(mailStatus?.authorized && mailStatus.email);
   const relogin = mailNeedsRelogin(mailStatus);
   return (
@@ -98,19 +110,35 @@ export function MailBindModal({ mailStatus, authUrl, loading, onClose, onBind, o
             <div className="modal-section-label">授权流程</div>
             <p className="modal-hint">
               {relogin
-                ? "请点击“重新登录邮箱”，系统会启动 Agent Mail OAuth 并自动打开授权页面。完成扫码后回到这里刷新状态。"
-                : "如果这里已经显示账号，说明本机 CLI 之前保存过授权。需要换账号时请点击“切换账号并重新扫码”，系统会先清除旧凭据，再打开 Agent Mail 授权页面。完成扫码后回到这里刷新状态。"}
+                ? "请点击“重新登录邮箱”，系统会启动 Agent Mail OAuth 并自动打开一个授权页面。完成扫码后这里会自动回传绑定状态。"
+                : "如果这里已经显示账号，说明本机 CLI 之前保存过授权。需要换账号时请点击“切换账号并重新扫码”，系统会先清除旧凭据，再打开一个 Agent Mail 授权页面。完成扫码后这里会自动回传绑定状态。"}
             </p>
             {authUrl ? (
               <button type="button" className="btn-ghost" onClick={onOpenAuthUrl}>
-                手动打开授权页
+                {authWindowOpened ? "聚焦授权窗口" : "打开授权窗口"}
               </button>
+            ) : null}
+            {authSession ? (
+              <div className={`mail-auth-session ${authSession.status || ""}`}>
+                <strong>
+                  {authSession.status === "authorized"
+                    ? "绑定成功"
+                    : authSession.status === "failed" || authSession.status === "timeout"
+                      ? "授权失败"
+                      : "等待登录完成"}
+                </strong>
+                <span>
+                  {authSession.status === "authorized"
+                    ? authSession.email || "邮箱已授权"
+                    : authSession.error || "请在弹出的授权窗口中完成登录，系统会自动回传结果。"}
+                </span>
+              </div>
             ) : null}
           </div>
         </div>
         <div className="modal-footer">
-          <button type="button" className="btn-ghost" onClick={onRefresh}>
-            刷新状态
+          <button type="button" className="btn-ghost" onClick={onRefresh} disabled={loading || refreshLoading}>
+            {refreshLoading ? "刷新中" : "刷新状态"}
           </button>
           <button type="button" className={bound ? "btn-ghost danger-soft" : "primary"} onClick={bound || relogin ? onRebind : onBind} disabled={loading}>
             {loading ? "启动授权中" : bound ? "切换账号并重新扫码" : relogin ? "重新登录邮箱" : "打开授权页面"}
@@ -334,8 +362,6 @@ export function RunLogList({
   setExpandedRunIds,
   runAnalyzeState,
   mailDeliveries,
-  mailStatus,
-  onBindMail,
   onConfirmMailDelivery,
   onRetryMailDelivery,
   loading,
@@ -349,7 +375,6 @@ export function RunLogList({
   function toggle(id) {
     setExpandedRunIds((current) => ({ ...current, [id]: !current[id] }));
   }
-  const relogin = mailNeedsRelogin(mailStatus);
 
   return (
     <div className="paper-inspector">
@@ -357,23 +382,6 @@ export function RunLogList({
         <span>执行日志</span>
         <h2>任务执行日志</h2>
         <p>点击任务执行后，这里会先显示当前任务进度；完成后回填真实检索式、来源状态、去重与入库文献。</p>
-      </div>
-      <div className={`mail-status-card ${mailStatus?.authorized ? "bound" : ""} ${relogin ? "expired" : ""}`}>
-        <div>
-          <strong>{mailStatus?.authorized ? "邮箱已绑定" : relogin ? "邮箱授权已失效" : "邮箱未绑定"}</strong>
-          <span>
-            {mailStatus?.authorized
-              ? mailStatus.email
-              : relogin
-                ? mailStatus?.authIssue || "请重新登录邮箱后再发送任务汇总邮件。"
-                : "绑定后才能在采集任务中开启任务汇总推送。"}
-          </span>
-        </div>
-        {!mailStatus?.authorized ? (
-          <button type="button" onClick={onBindMail} disabled={loading === "mail-auth"}>
-            {relogin ? "重新登录" : "绑定邮箱"}
-          </button>
-        ) : null}
       </div>
       <ActiveRunLogCard log={activeRunLog} runAnalyzeState={runAnalyzeState} />
       <div className="run-list">

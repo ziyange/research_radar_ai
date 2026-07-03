@@ -8,6 +8,7 @@ import re
 import shutil
 import smtplib
 import subprocess
+import threading
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from .literature_runtime.fulltext import fetch_fulltext_for_paper, save_paper_as
 from .literature_runtime.markdown_pdf import markdown_file_to_pdf, markdown_to_pdf, markdown_to_plain_text
 from .literature_runtime.repository import (
     ROOT_DIR,
+    is_test_artifact,
 )
 from .literature_runtime.retrieval import (
     dedupe,
@@ -42,6 +44,86 @@ from .settings import get_settings
 
 
 router = APIRouter(prefix="/api/v1/literature", tags=["literature"])
+MAIL_AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
+MAIL_AUTH_SESSION_TTL_SECONDS = 300
+MAIL_AUTH_LOCK = threading.Lock()
+
+
+def visible_tasks() -> list[dict[str, Any]]:
+    return [
+        task
+        for task in repository.tasks
+        if not is_test_artifact("literature_tasks", task)
+    ]
+
+
+def cleanup_mail_auth_sessions() -> None:
+    now = time.monotonic()
+    with MAIL_AUTH_LOCK:
+        stale_ids = [
+            session_id
+            for session_id, session in MAIL_AUTH_SESSIONS.items()
+            if now - float(session.get("startedMono") or now) > MAIL_AUTH_SESSION_TTL_SECONDS + 60
+        ]
+        for session_id in stale_ids:
+            session = MAIL_AUTH_SESSIONS.pop(session_id, None)
+            process = session.get("process") if session else None
+            if process and process.poll() is None:
+                process.terminate()
+
+
+def read_mail_auth_output(session_id: str) -> None:
+    with MAIL_AUTH_LOCK:
+        session = MAIL_AUTH_SESSIONS.get(session_id)
+        process = session.get("process") if session else None
+    if not session or not process or process.stdout is None:
+        return
+    try:
+        for line in process.stdout:
+            with MAIL_AUTH_LOCK:
+                current = MAIL_AUTH_SESSIONS.get(session_id)
+                if not current:
+                    return
+                current["output"] = f"{current.get('output') or ''}{line}"
+                match = re.search(r"https?://\S+", current["output"])
+                if match and not current.get("authUrl"):
+                    current["authUrl"] = match.group(0)
+                    current["status"] = "running"
+    finally:
+        with MAIL_AUTH_LOCK:
+            current = MAIL_AUTH_SESSIONS.get(session_id)
+            if current:
+                current["readerDone"] = True
+
+
+def mail_auth_session_payload(session_id: str) -> dict[str, Any]:
+    cleanup_mail_auth_sessions()
+    with MAIL_AUTH_LOCK:
+        session = MAIL_AUTH_SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail={"code": "MAIL_AUTH_SESSION_NOT_FOUND"})
+    process = session.get("process")
+    elapsed = time.monotonic() - float(session.get("startedMono") or time.monotonic())
+    if process and process.poll() is None and elapsed > MAIL_AUTH_SESSION_TTL_SECONDS:
+        process.terminate()
+        with MAIL_AUTH_LOCK:
+            session["status"] = "timeout"
+            session["error"] = "授权窗口超时，请重新登录邮箱。"
+    elif process and process.poll() is not None and session.get("status") not in {"authorized", "failed", "timeout"}:
+        status = mail_status()
+        with MAIL_AUTH_LOCK:
+            if status.get("authorized"):
+                session["status"] = "authorized"
+                session["email"] = status.get("email") or ""
+                session["error"] = ""
+            else:
+                session["status"] = "failed"
+                session["error"] = status.get("authIssue") or status.get("message") or "授权失败，请重新登录邮箱。"
+    with MAIL_AUTH_LOCK:
+        public = {key: value for key, value in session.items() if key not in {"process", "startedMono"}}
+    public["elapsedSeconds"] = round(elapsed)
+    return public
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -456,12 +538,27 @@ def mail_status() -> dict[str, Any]:
             "email": settings.email_from,
             "sendCapable": configured,
             "provider": "smtp",
+            "authState": "authorized" if configured else "unauthorized",
+            "authIssue": "" if configured else "SMTP_CONFIG_MISSING",
+            "requiresLogin": not configured,
             "message": "ok" if configured else "SMTP_CONFIG_MISSING",
         }
     enabled = settings.agent_mail_enabled or settings.email_provider == "agent_mail"
     cli = agent_mail_cli_path()
     if not shutil.which(cli) and not Path(cli).exists():
-        return {"enabled": enabled, "installed": False, "authorized": False, "email": "", "sendCapable": False, "cli": cli, "message": "Agent Mail CLI 未安装"}
+        return {
+            "enabled": enabled,
+            "installed": False,
+            "authorized": False,
+            "email": "",
+            "sendCapable": False,
+            "provider": "agent_mail",
+            "authState": "unauthorized",
+            "authIssue": "Agent Mail CLI 未安装",
+            "requiresLogin": True,
+            "cli": cli,
+            "message": "Agent Mail CLI 未安装",
+        }
     result = run_agent_mail(["+me"], timeout=getattr(settings, "agent_mail_status_timeout_seconds", 30))
     output = f"{result.stdout}\n{result.stderr}".strip()
     payload = parse_cli_json(output) or {}
@@ -1120,7 +1217,7 @@ async def scan(payload: TaskPayload) -> dict[str, Any]:
 @router.get("/tasks")
 def list_tasks() -> dict[str, Any]:
     normalize_all_tasks_mail_push()
-    return {"tasks": repository.tasks}
+    return {"tasks": visible_tasks()}
 
 
 @router.post("/tasks")
@@ -1135,7 +1232,7 @@ def create_task(payload: TaskPayload) -> dict[str, Any]:
     normalize_task_mail_push(task)
     repository.tasks = [task, *repository.tasks]
     repository._persist_item("tasks", task)
-    return {"task": task, "tasks": repository.tasks}
+    return {"task": task, "tasks": visible_tasks()}
 
 
 @router.put("/tasks/{task_id}")
@@ -1146,7 +1243,7 @@ def update_task(task_id: str, payload: TaskPayload) -> dict[str, Any]:
             normalize_task_mail_push(updated)
             repository.tasks[index] = updated
             repository._persist_item("tasks", updated)
-            return {"task": updated, "tasks": repository.tasks}
+            return {"task": updated, "tasks": visible_tasks()}
     raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND"})
 
 
@@ -1154,7 +1251,7 @@ def update_task(task_id: str, payload: TaskPayload) -> dict[str, Any]:
 def delete_task(task_id: str) -> dict[str, Any]:
     repository.tasks = [task for task in repository.tasks if task["id"] != task_id]
     repository._delete_item("tasks", task_id)
-    return {"tasks": repository.tasks}
+    return {"tasks": visible_tasks()}
 
 
 @router.post("/tasks/{task_id}:run")
@@ -1266,7 +1363,7 @@ async def run_task(task_id: str, payload: dict[str, Any] | None = None) -> dict[
             )
         repository._persist_item("tasks", task)
         repository._persist_item("scanRuns", result["run"])
-        result["tasks"] = repository.tasks
+        result["tasks"] = visible_tasks()
         result["mailDeliveries"] = repository.serialize_library()["mailDeliveries"]
         return result
     except Exception as exc:
@@ -1377,6 +1474,8 @@ def get_mail_status() -> dict[str, Any]:
 
 @router.post("/mail/auth:start")
 def start_mail_auth() -> dict[str, Any]:
+    cleanup_mail_auth_sessions()
+    session_id = f"mail_auth_{uuid4()}"
     process = subprocess.Popen(
         [agent_mail_cli_path(), "auth", "login"],
         cwd=str(ROOT_DIR),
@@ -1387,35 +1486,48 @@ def start_mail_auth() -> dict[str, Any]:
         errors="replace",
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
-    output = ""
-    auth_url = ""
+    with MAIL_AUTH_LOCK:
+        MAIL_AUTH_SESSIONS[session_id] = {
+            "id": session_id,
+            "status": "starting",
+            "authUrl": "",
+            "output": "",
+            "error": "",
+            "email": "",
+            "startedAt": now_iso(),
+            "startedMono": time.monotonic(),
+            "process": process,
+        }
+    threading.Thread(target=read_mail_auth_output, args=(session_id,), daemon=True).start()
     started = time.monotonic()
     while time.monotonic() - started < 15:
-        if process.stdout is None:
+        with MAIL_AUTH_LOCK:
+            session = MAIL_AUTH_SESSIONS.get(session_id) or {}
+            auth_url = session.get("authUrl") or ""
+        if auth_url:
             break
-        chunk = process.stdout.readline()
-        if chunk:
-            output += chunk
-            match = re.search(r"https?://\S+", output)
-            if match:
-                auth_url = match.group(0)
-                break
         if process.poll() is not None:
             break
+        time.sleep(0.1)
+    session = mail_auth_session_payload(session_id)
+    auth_url = session.get("authUrl") or ""
     if not auth_url:
         raise HTTPException(
             status_code=503,
-            detail={"code": "AGENT_MAIL_AUTH_URL_MISSING", "message": output or "未获取到授权链接"},
+            detail={"code": "AGENT_MAIL_AUTH_URL_MISSING", "message": session.get("error") or session.get("output") or "未获取到授权链接"},
         )
     return {
+        "sessionId": session_id,
         "authUrl": auth_url,
-        "session": {
-            "status": "running",
-            "url": auth_url,
-            "output": output,
-            "startedAt": now_iso(),
-        },
+        "session": session,
     }
+
+
+@router.get("/mail/auth:sessions/{session_id}")
+def get_mail_auth_session(session_id: str) -> dict[str, Any]:
+    session = mail_auth_session_payload(session_id)
+    status = mail_status() if session.get("status") in {"authorized", "failed", "timeout"} else None
+    return {"session": session, "mail": status}
 
 
 @router.post("/mail/auth:logout")

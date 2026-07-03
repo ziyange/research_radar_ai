@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -10,6 +11,50 @@ from research_radar_api.settings import get_settings
 
 
 ROOT_DIR = Path(__file__).resolve().parents[5]
+
+
+def running_under_pytest() -> bool:
+    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def is_test_artifact(entity_type: str, payload: dict[str, Any]) -> bool:
+    if running_under_pytest():
+        return False
+    item_id = str(payload.get("id") or payload.get("taskId") or "")
+    query = str(payload.get("query") or "").strip().lower()
+    title = str(payload.get("title") or "").strip().lower()
+    if item_id.startswith(("paper_test_", "report_test_", "mail_test_")):
+        return True
+    if item_id in {
+        "task_digest_push",
+        "task_digest_empty_result",
+        "task_legacy_missing_recipient",
+        "scan_task_digest",
+        "scan_empty_digest",
+        "scan_legacy_missing_recipient",
+    }:
+        return True
+    if entity_type == "literature_tasks":
+        recipients = [str(item).lower() for item in payload.get("recipientEmails") or []]
+        return (
+            query == "nanomaterials plant"
+            and "recipient@example.com" in recipients
+            and int(payload.get("count") or 0) == 3
+            and float(payload.get("minScore") or 0) == 50
+        )
+    if entity_type == "literature_papers" and (
+        item_id.startswith("paper_test_")
+        or title.startswith(("full text acceptance paper", "crossref fallback"))
+    ):
+        return True
+    if entity_type == "literature_scan_runs":
+        task_id = str(payload.get("taskId") or "")
+        return task_id.startswith("task_digest_") or task_id == "task_legacy_missing_recipient"
+    if entity_type == "literature_mail_deliveries":
+        kind = payload.get("kind")
+        task_id = str(payload.get("taskId") or "")
+        return kind == "mail_test" or task_id.startswith("task_digest_") or task_id == "task_legacy_missing_recipient"
+    return False
 
 
 def resolve_reader_file(relative: str, storage_root: Path | None = None) -> Path | None:
@@ -64,6 +109,7 @@ class LiteratureRepository:
         loaded = False
         for key, entity_type in self.entity_types.items():
             payloads = rows.get(entity_type) or []
+            payloads = [item for item in payloads if not is_test_artifact(entity_type, item)]
             payloads = sorted(
                 payloads,
                 key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""),
@@ -83,12 +129,12 @@ class LiteratureRepository:
         item_id = str(item.get("id") or item.get("taskId") or uuid4())
         item["id"] = item_id
         self.persistence.save(entity_type, item_id, item)
-        if not self.persistence.enabled:
+        if self._should_persist_file_entities():
             self._persist_file_entity(entity_type, item_id, item)
 
     def _delete_item(self, key: str, item_id: str) -> None:
         self.persistence.delete(self.entity_types[key], item_id)
-        if not self.persistence.enabled:
+        if self._should_persist_file_entities():
             path = self.entities_dir / self.entity_types[key] / f"{item_id}.json"
             try:
                 path.unlink(missing_ok=True)
@@ -112,6 +158,17 @@ class LiteratureRepository:
                 if isinstance(payload, dict):
                     rows.setdefault(entity_type, []).append(payload)
         return rows
+
+    def _should_persist_file_entities(self) -> bool:
+        if self.persistence.enabled:
+            return False
+        if not running_under_pytest():
+            return True
+        try:
+            self.storage_root.relative_to(ROOT_DIR / "tmp")
+            return True
+        except ValueError:
+            return False
 
     def _persist_file_entity(self, entity_type: str, item_id: str, item: dict[str, Any]) -> None:
         directory = self.entities_dir / entity_type
@@ -164,11 +221,31 @@ class LiteratureRepository:
         return item
 
     def serialize_library(self) -> dict[str, Any]:
+        papers = [
+            item
+            for item in self.library["papers"]
+            if not is_test_artifact("literature_papers", item)
+        ]
+        scan_runs = [
+            item
+            for item in self.library["scanRuns"]
+            if not is_test_artifact("literature_scan_runs", item)
+        ]
+        reports = [
+            item
+            for item in self.library["reports"]
+            if not is_test_artifact("literature_reports", item)
+        ]
+        mail_deliveries = [
+            item
+            for item in self.library["mailDeliveries"]
+            if not is_test_artifact("literature_mail_deliveries", item)
+        ]
         return {
-            "papers": [self.serialize_paper(item) for item in self.library["papers"]],
-            "scanRuns": self.library["scanRuns"],
-            "reports": [self.serialize_report(item) for item in self.library["reports"]],
+            "papers": [self.serialize_paper(item) for item in papers],
+            "scanRuns": scan_runs,
+            "reports": [self.serialize_report(item) for item in reports],
             "mailDeliveries": [
-                self.serialize_delivery(item) for item in self.library["mailDeliveries"]
+                self.serialize_delivery(item) for item in mail_deliveries
             ],
         }

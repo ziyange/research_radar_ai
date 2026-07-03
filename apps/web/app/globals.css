@@ -2758,6 +2758,44 @@ input {
   font-size: 12.5px;
 }
 
+.mail-auth-session {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 10px 11px;
+  color: #38514b;
+  background: #f8fbf9;
+  border: 1px solid #dfe9e4;
+  border-radius: 9px;
+}
+
+.mail-auth-session strong,
+.mail-auth-session span {
+  display: block;
+}
+
+.mail-auth-session strong {
+  font-size: 12.5px;
+}
+
+.mail-auth-session span {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.mail-auth-session.authorized {
+  color: #075f55;
+  background: #e9f7f3;
+  border-color: #bfe0d7;
+}
+
+.mail-auth-session.failed,
+.mail-auth-session.timeout {
+  color: #9a3412;
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
 /* ===== 执行日志列表 ===== */
 .active-run-card {
   display: flex;
