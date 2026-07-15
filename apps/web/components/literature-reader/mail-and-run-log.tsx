@@ -165,6 +165,30 @@ export function mailBindingLabel(mailStatus) {
   return "绑定邮箱";
 }
 
+function activeEventKey(event) {
+  const objectKey = event.title || event.query || event.paperId || event.reportId || event.deliveryId || "";
+  return [
+    event.stage || "event",
+    event.source || "",
+    objectKey,
+  ].join("|");
+}
+
+function activeRunningEvents(events) {
+  const closedKeys = new Set();
+  const active = [];
+  for (const event of [...(events || [])].reverse()) {
+    if (event.stage === "queue") continue;
+    const key = activeEventKey(event);
+    if (event.status === "running") {
+      if (!closedKeys.has(key)) active.push(event);
+    } else {
+      closedKeys.add(key);
+    }
+  }
+  return active.reverse();
+}
+
 function ActiveRunLogCard({ log, runAnalyzeState }) {
   if (!log) return null;
   const analyzeState = log.runId ? runAnalyzeState[log.runId] : null;
@@ -179,7 +203,7 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
   const currentStepIndex = currentStep
     ? Math.max(1, steps.findIndex((step) => step === currentStep) + 1)
     : 0;
-  const recentEvents = [...liveEvents].slice(-6).reverse();
+  const currentEvents = log.status === "running" ? activeRunningEvents(liveEvents) : [];
   return (
     <div className={`active-run-card ${log.status}`}>
       <div className="active-run-header">
@@ -214,11 +238,11 @@ function ActiveRunLogCard({ log, runAnalyzeState }) {
           </div>
         </div>
       ) : null}
-      {recentEvents.length ? (
+      {currentEvents.length ? (
         <div className="active-live-events">
           <strong>实时动态日志</strong>
           <div>
-            {recentEvents.map((event) => (
+            {currentEvents.map((event) => (
               <p className={event.status || "done"} key={event.key}>
                 <span>{formatRunTime(event.at)}</span>
                 {event.text}

@@ -55,7 +55,7 @@ function executionEventsToSteps(events, fallbackSteps = [], complete = false) {
   if (!events?.length) return fallbackSteps;
   return events.map((event, index) => {
     let status = event.status || "done";
-    if (status === "running" && (complete || index < events.length - 1)) {
+    if (status === "running" && complete) {
       status = "done";
     }
     return {
@@ -66,15 +66,6 @@ function executionEventsToSteps(events, fallbackSteps = [], complete = false) {
       text: event.message || `${event.stage || "步骤"} 已完成`,
     };
   });
-}
-
-function stageStatusFromEvents(stageKeys, events, complete) {
-  const stageEvents = (events || []).filter((event) => stageKeys.includes(event.stage));
-  if (!stageEvents.length) return "pending";
-  if (stageEvents.some((event) => event.status === "running")) return complete ? "done" : "running";
-  if (stageEvents.some((event) => event.status === "failed")) return "warning";
-  if (stageEvents.some((event) => event.status === "skipped")) return "skipped";
-  return "done";
 }
 
 function majorStepsFromEvents(task, events, complete = false) {
@@ -125,8 +116,32 @@ function majorStepsFromEvents(task, events, complete = false) {
         ]
       : []),
   ];
-  return definitions.map((definition) => {
-    const status = stageStatusFromEvents(definition.stages, events, complete);
+  const latestIndexByStage = new Map();
+  for (const [index, event] of (events || []).entries()) {
+    const definitionIndex = definitions.findIndex((definition) => definition.stages.includes(event.stage));
+    if (definitionIndex >= 0) latestIndexByStage.set(definitionIndex, index);
+  }
+  const activeDefinitionIndex = latestIndexByStage.size ? Math.max(...latestIndexByStage.keys()) : 0;
+  return definitions.map((definition, index) => {
+    const stageEvents = (events || []).filter((event) => definition.stages.includes(event.stage));
+    let status = "pending";
+    if (stageEvents.length) {
+      if (complete || index < activeDefinitionIndex) {
+        status = stageEvents.some((event) => event.status === "failed")
+          ? "warning"
+          : stageEvents.some((event) => event.status === "skipped")
+            ? "skipped"
+            : "done";
+      } else if (index === activeDefinitionIndex) {
+        status = stageEvents.some((event) => event.status === "failed")
+          ? "warning"
+          : stageEvents.some((event) => event.status === "skipped")
+            ? "skipped"
+            : "running";
+      }
+    } else if (!events?.length && index === 0 && !complete) {
+      status = "running";
+    }
     return {
       key: definition.key,
       title: definition.title,
