@@ -586,9 +586,24 @@ export function App() {
       const started = await api.runTaskAsync(task.id);
       setActiveRunLog(buildRunJobLog(effectiveTask, started.job));
       let job = started.job;
+      let pollFailures = 0;
       for (;;) {
         await wait(1000);
-        const progress = await api.getRunJob(job.id);
+        let progress;
+        try {
+          progress = await api.getRunJob(job.id);
+          pollFailures = 0;
+        } catch (pollError) {
+          pollFailures += 1;
+          if (pollFailures < 6) {
+            setStatus({
+              tone: "running",
+              message: "后端仍在执行，正在重新读取任务进度。",
+            });
+            continue;
+          }
+          throw pollError;
+        }
         job = progress.job;
         setActiveRunLog(buildRunJobLog(effectiveTask, job));
         if (job.status !== "running") break;

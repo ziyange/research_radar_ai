@@ -919,6 +919,75 @@ def test_literature_task_mail_disconnect_does_not_fail_saved_run(monkeypatch) ->
     )
 
 
+def test_literature_async_task_mail_disconnect_finishes_job(monkeypatch) -> None:
+    paper = add_fulltext_test_paper("paper_test_async_mail_disconnect")
+    task = {
+        "id": f"task_async_mail_disconnect_{uuid4().hex}",
+        "query": "async mail disconnect research",
+        "count": 1,
+        "yearFrom": 2021,
+        "minScore": 0,
+        "sources": ["openalex"],
+        "downloadOpenPdf": False,
+        "autoAnalyze": False,
+        "dailyEnabled": False,
+        "dailyTime": "09:00",
+        "dailyTimezone": "Asia/Shanghai",
+        "notifyAfterRun": True,
+        "recipientEmails": ["recipient@example.com"],
+        "ccEmails": [],
+        "bccEmails": [],
+    }
+    literature.repository.tasks = [task, *[item for item in literature.repository.tasks if item["id"] != task["id"]]]
+
+    async def fake_perform_scan(payload, task_id=None, trigger="manual", event_sink=None):  # noqa: ANN001, ARG001
+        if event_sink:
+            event_sink(literature.execution_event("save", "done", "保存 1 篇文献。"))
+        return {
+            "run": {
+                "id": f"scan_async_mail_disconnect_{uuid4().hex}",
+                "taskId": task_id,
+                "query": payload["query"],
+                "sourceStatuses": [{"source": "openalex", "query": payload["query"], "status": "succeeded", "count": 1}],
+                "candidateCount": 1,
+                "uniqueCount": 1,
+                "duplicateCount": 0,
+                "savedPaperIds": [paper["id"]],
+                "savedCount": 1,
+                "targetMet": True,
+                "createdAt": "2026-01-01T00:00:00+00:00",
+            },
+            "papers": [paper],
+            "duplicates": [],
+            "library": literature.repository.serialize_library(),
+        }
+
+    monkeypatch.setattr(literature, "perform_scan", fake_perform_scan)
+
+    def fail_task_digest(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        raise RuntimeError("Server disconnected without sending a response.")
+
+    monkeypatch.setattr(literature, "add_task_digest_delivery", fail_task_digest)
+
+    started = client.post(f"/api/v1/literature/tasks/{task['id']}:run-async", json={})
+    assert started.status_code == 200
+    job_id = started.json()["job"]["id"]
+
+    job = None
+    for _ in range(40):
+        time.sleep(0.05)
+        response = client.get(f"/api/v1/literature/runs/{job_id}")
+        assert response.status_code == 200
+        job = response.json()["job"]
+        if job["status"] != "running":
+            break
+
+    assert job
+    assert job["status"] == "done"
+    assert job["result"]["taskDigestDelivery"]["status"] == "failed"
+    assert "邮件服务连接中断" in job["result"]["taskDigestDelivery"]["error"]
+
+
 def test_markdown_to_pdf_generates_mobile_readable_attachment() -> None:
     pdf_path = literature.repository.mail_dir / f"markdown-pdf-test-{uuid4().hex}.pdf"
     markdown_to_pdf(

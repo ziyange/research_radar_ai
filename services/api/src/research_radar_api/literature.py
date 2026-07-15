@@ -1017,7 +1017,22 @@ def write_mail_body_files(delivery_id: str, subject: str, markdown: str) -> dict
     pdf_path = base.with_suffix(".pdf")
     markdown_path.write_text(markdown, encoding="utf-8")
     text_path.write_text(markdown_to_plain_text(markdown), encoding="utf-8")
-    markdown_to_pdf(markdown, pdf_path, title=subject)
+    try:
+        markdown_to_pdf(markdown, pdf_path, title=subject)
+    except Exception as exc:
+        fallback = "\n".join(
+            [
+                f"# {subject}",
+                "",
+                "原 Markdown 转 PDF 失败，系统已生成纯文本兜底 PDF。",
+                f"失败原因: {exc}",
+                "",
+                "## 纯文本内容",
+                "",
+                markdown_to_plain_text(markdown, max_chars=18000),
+            ]
+        )
+        markdown_to_pdf(fallback, pdf_path, title=subject)
     return {
         "markdownPath": str(markdown_path.relative_to(ROOT_DIR)).replace("\\", "/"),
         "bodyTextPath": str(text_path.relative_to(ROOT_DIR)).replace("\\", "/"),
@@ -1141,7 +1156,21 @@ def pdf_asset_for_markdown(source: Path, target_name: str, title: str = "") -> P
         markdown_file_to_pdf(source, target, title=title or source.stem)
         return target
     except Exception:
-        return None
+        try:
+            markdown = source.read_text(encoding="utf-8", errors="ignore")
+            fallback = "\n".join(
+                [
+                    f"# {title or source.stem}",
+                    "",
+                    "原 Markdown 转 PDF 失败，系统已生成纯文本兜底 PDF。",
+                    "",
+                    markdown_to_plain_text(markdown, max_chars=18000),
+                ]
+            )
+            markdown_to_pdf(fallback, target, title=title or source.stem)
+            return target
+        except Exception:
+            return None
 
 
 def build_task_digest_attachments(
@@ -1704,7 +1733,13 @@ async def execute_task_run(
                     f"生成任务汇总邮件：To {', '.join(task.get('recipientEmails') or [])}。",
                 )
                 try:
-                    delivery = add_task_digest_delivery(task, result["run"], digest_papers, digest_reports)
+                    delivery = await asyncio.to_thread(
+                        add_task_digest_delivery,
+                        task,
+                        result["run"],
+                        digest_papers,
+                        digest_reports,
+                    )
                     result["taskDigestDelivery"] = delivery
                     delivery_error = user_facing_mail_error(delivery.get("error"))
                     emit_event(
