@@ -857,6 +857,68 @@ def test_literature_task_push_creates_single_digest_with_zip_attachments(monkeyp
             assert any(name.endswith(".pdf") for name in names)
 
 
+def test_literature_task_mail_disconnect_does_not_fail_saved_run(monkeypatch) -> None:
+    paper = add_fulltext_test_paper("paper_test_mail_disconnect")
+    task = {
+        "id": f"task_mail_disconnect_{uuid4().hex}",
+        "query": "mail disconnect research",
+        "count": 1,
+        "yearFrom": 2021,
+        "minScore": 0,
+        "sources": ["openalex"],
+        "downloadOpenPdf": False,
+        "autoAnalyze": False,
+        "dailyEnabled": False,
+        "dailyTime": "09:00",
+        "dailyTimezone": "Asia/Shanghai",
+        "notifyAfterRun": True,
+        "recipientEmails": ["recipient@example.com"],
+        "ccEmails": [],
+        "bccEmails": [],
+    }
+    literature.repository.tasks = [task, *[item for item in literature.repository.tasks if item["id"] != task["id"]]]
+
+    async def fake_perform_scan(payload, task_id=None, trigger="manual"):  # noqa: ANN001, ARG001
+        return {
+            "run": {
+                "id": f"scan_mail_disconnect_{uuid4().hex}",
+                "taskId": task_id,
+                "query": payload["query"],
+                "sourceStatuses": [{"source": "openalex", "query": payload["query"], "status": "succeeded", "count": 1}],
+                "candidateCount": 1,
+                "uniqueCount": 1,
+                "duplicateCount": 0,
+                "savedPaperIds": [paper["id"]],
+                "savedCount": 1,
+                "targetMet": True,
+                "createdAt": "2026-01-01T00:00:00+00:00",
+            },
+            "papers": [paper],
+            "duplicates": [],
+            "library": literature.repository.serialize_library(),
+        }
+
+    monkeypatch.setattr(literature, "perform_scan", fake_perform_scan)
+
+    def fail_task_digest(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        raise RuntimeError("Server disconnected without sending a response.")
+
+    monkeypatch.setattr(literature, "add_task_digest_delivery", fail_task_digest)
+
+    response = client.post(f"/api/v1/literature/tasks/{task['id']}:run", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run"]["savedCount"] == 1
+    assert payload["taskDigestDelivery"]["status"] == "failed"
+    assert "邮件服务连接中断" in payload["taskDigestDelivery"]["error"]
+    assert task["lastRunStatus"] == "succeeded"
+    assert any(
+        item["stage"] == "mail" and item["status"] == "warning"
+        for item in payload["run"]["executionEvents"]
+    )
+
+
 def test_markdown_to_pdf_generates_mobile_readable_attachment() -> None:
     pdf_path = literature.repository.mail_dir / f"markdown-pdf-test-{uuid4().hex}.pdf"
     markdown_to_pdf(

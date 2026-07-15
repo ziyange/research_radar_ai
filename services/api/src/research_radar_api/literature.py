@@ -809,6 +809,22 @@ def agent_mail_retryable_error_summary(output: str) -> str:
     return message or "Agent Mail 服务临时不可用，请稍后重试。"
 
 
+def user_facing_mail_error(error: Any) -> str:
+    message = str(error or "").strip()
+    lowered = message.lower()
+    if not message:
+        return "邮件发送失败，请稍后重试。"
+    if "server disconnected" in lowered or "without sending a response" in lowered:
+        return "邮件服务连接中断，任务结果已保存，请稍后在任务邮件状态中重试发送。"
+    if "socket hang up" in lowered or "econnreset" in lowered:
+        return "邮件服务连接被中断，任务结果已保存，请稍后重试发送。"
+    if "resolve alias" in lowered and ("/v1/me" in lowered or "eof" in lowered):
+        return "Agent Mail 暂时无法读取已授权发件邮箱，任务结果已保存，请稍后重试发送或重新登录邮箱。"
+    if "confirmation token" in lowered and ("expired" in lowered or "invalid" in lowered):
+        return "邮件确认令牌已失效，请重新生成后重试发送。"
+    return message
+
+
 def run_agent_mail_send_with_retry(args: list[str], cwd: Path, timeout: int) -> CliResult:
     result = run_agent_mail(args, cwd=cwd, timeout=timeout)
     output = cli_output(result)
@@ -1687,18 +1703,34 @@ async def execute_task_run(
                     "running",
                     f"生成任务汇总邮件：To {', '.join(task.get('recipientEmails') or [])}。",
                 )
-                delivery = add_task_digest_delivery(task, result["run"], digest_papers, digest_reports)
-                result["taskDigestDelivery"] = delivery
-                emit_event(
-                    result["run"].setdefault("executionEvents", []),
-                    event_sink,
-                    "mail",
-                    "done" if delivery.get("status") == "sent" else "warning",
-                    f"任务汇总邮件{'已发送' if delivery.get('status') == 'sent' else '未发送'}：{delivery.get('status')}；{delivery.get('error') or '无错误详情'}。",
-                    deliveryId=delivery.get("id"),
-                    deliveryStatus=delivery.get("status"),
-                    error=delivery.get("error"),
-                )
+                try:
+                    delivery = add_task_digest_delivery(task, result["run"], digest_papers, digest_reports)
+                    result["taskDigestDelivery"] = delivery
+                    delivery_error = user_facing_mail_error(delivery.get("error"))
+                    emit_event(
+                        result["run"].setdefault("executionEvents", []),
+                        event_sink,
+                        "mail",
+                        "done" if delivery.get("status") == "sent" else "warning",
+                        f"任务汇总邮件{'已发送' if delivery.get('status') == 'sent' else '未发送'}：{delivery.get('status')}；{delivery_error if delivery.get('error') else '无错误详情'}。",
+                        deliveryId=delivery.get("id"),
+                        deliveryStatus=delivery.get("status"),
+                        error=delivery.get("error"),
+                    )
+                except Exception as exc:
+                    safe_error = user_facing_mail_error(exc)
+                    result["taskDigestDelivery"] = {
+                        "status": "failed",
+                        "error": safe_error,
+                    }
+                    emit_event(
+                        result["run"].setdefault("executionEvents", []),
+                        event_sink,
+                        "mail",
+                        "warning",
+                        f"任务汇总邮件未发送：{safe_error}",
+                        error=safe_error,
+                    )
             else:
                 result["taskDigestDelivery"] = None
         elif task.get("notifyAfterRun"):

@@ -33,27 +33,118 @@ function FlowchartBlock({ source }) {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  const edgeLines = lines.filter((line) => line.includes("-->"));
-  const nodes = [];
-  const seen = new Set();
-  for (const line of edgeLines) {
-    const matches = [...line.matchAll(/([A-Za-z0-9_]+)\[([^\]]+)\]/g)];
-    for (const match of matches) {
-      if (!seen.has(match[1])) {
-        seen.add(match[1]);
-        nodes.push({ id: match[1], label: match[2] });
-      }
-    }
+
+  const nodeMap = new Map();
+  const edges = [];
+
+  function cleanLabel(value) {
+    return String(value || "")
+      .replace(/^["'`]+|["'`]+$/g, "")
+      .replace(/<br\s*\/?>/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   }
+
+  function readNode(raw) {
+    const idMatch = String(raw || "").trim().match(/^([A-Za-z0-9_]+)/);
+    if (!idMatch) return null;
+    const id = idMatch[1];
+    const rest = String(raw || "").trim().slice(id.length).trim();
+    const labelMatch =
+      rest.match(/^\[\s*"?([\s\S]*?)"?\s*\]/) ||
+      rest.match(/^\(\s*"?([\s\S]*?)"?\s*\)/) ||
+      rest.match(/^\{\s*"?([\s\S]*?)"?\s*\}/);
+    const label = cleanLabel(labelMatch?.[1] || id);
+    if (!nodeMap.has(id)) nodeMap.set(id, { id, label });
+    if (label && nodeMap.get(id).label === id) nodeMap.get(id).label = label;
+    return nodeMap.get(id);
+  }
+
+  for (const line of lines) {
+    if (/^(flowchart|graph|style|classDef|class)\b/i.test(line)) continue;
+    const edgeMatch = line.match(/^(.+?)\s*(?:-->|---|-.->|==>)\s*(.+?)(?:\s*$|;)/);
+    if (edgeMatch) {
+      const from = readNode(edgeMatch[1].trim());
+      const to = readNode(edgeMatch[2].trim());
+      if (from && to) edges.push({ from: from.id, to: to.id });
+      continue;
+    }
+    readNode(line);
+  }
+  const nodes = [...nodeMap.values()];
   if (!nodes.length) return <pre className="md-code">{source}</pre>;
+
+  const levels = new Map();
+  nodes.forEach((node) => levels.set(node.id, 0));
+  edges.forEach((edge) => {
+    const fromLevel = levels.get(edge.from) || 0;
+    levels.set(edge.to, Math.max(levels.get(edge.to) || 0, fromLevel + 1));
+  });
+  const grouped = new Map();
+  nodes.forEach((node) => {
+    const level = levels.get(node.id) || 0;
+    grouped.set(level, [...(grouped.get(level) || []), node]);
+  });
+  const width = 920;
+  const nodeWidth = 250;
+  const nodeHeight = 72;
+  const levelGap = 124;
+  const maxLevel = Math.max(...[...grouped.keys(), 0]);
+  const height = Math.max(260, 96 + maxLevel * levelGap);
+  const positions = new Map();
+  [...grouped.entries()].forEach(([level, group]) => {
+    const gap = Math.min(300, Math.max(170, (width - nodeWidth) / Math.max(group.length, 1)));
+    const startX = width / 2 - ((group.length - 1) * gap) / 2 - nodeWidth / 2;
+    group.forEach((node, index) => {
+      positions.set(node.id, {
+        x: Math.max(28, Math.min(width - nodeWidth - 28, startX + index * gap)),
+        y: 36 + level * levelGap,
+      });
+    });
+  });
+
   return (
-    <div className="mermaid-flow">
-      {nodes.map((node, index) => (
-        <div className="flow-step" key={node.id}>
-          <span>{index + 1}</span>
-          <p>{node.label}</p>
-        </div>
-      ))}
+    <div className="logic-graph-shell">
+      <svg className="logic-graph-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="核心逻辑流程图">
+        <defs>
+          <marker id="logic-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" />
+          </marker>
+          <linearGradient id="logic-node-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#ffffff" />
+            <stop offset="100%" stopColor="#edf7ff" />
+          </linearGradient>
+        </defs>
+        {edges.map((edge, index) => {
+          const from = positions.get(edge.from);
+          const to = positions.get(edge.to);
+          if (!from || !to) return null;
+          const x1 = from.x + nodeWidth / 2;
+          const y1 = from.y + nodeHeight;
+          const x2 = to.x + nodeWidth / 2;
+          const y2 = to.y;
+          const controlY = y1 + Math.max(34, (y2 - y1) / 2);
+          return (
+            <path
+              className="logic-graph-edge"
+              key={`${edge.from}-${edge.to}-${index}`}
+              d={`M ${x1} ${y1} C ${x1} ${controlY}, ${x2} ${controlY - 18}, ${x2} ${y2 - 6}`}
+              markerEnd="url(#logic-arrow)"
+            />
+          );
+        })}
+        {nodes.map((node) => {
+          const position = positions.get(node.id);
+          if (!position) return null;
+          return (
+            <foreignObject key={node.id} x={position.x} y={position.y} width={nodeWidth} height={nodeHeight}>
+              <div className="logic-graph-node">
+                <strong>{node.label}</strong>
+              </div>
+            </foreignObject>
+          );
+        })}
+      </svg>
     </div>
   );
 }
@@ -101,8 +192,9 @@ export function renderMarkdown(markdown) {
   function flushCode() {
     if (!code) return;
     const content = code.lines.join("\n");
+    const language = String(code.lang || "").toLowerCase();
     blocks.push(
-      code.lang === "mermaid"
+      language.startsWith("mermaid")
         ? <FlowchartBlock source={content} key={`code-${blocks.length}`} />
         : <pre className="md-code" key={`code-${blocks.length}`}>{content}</pre>,
     );
